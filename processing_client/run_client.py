@@ -1,16 +1,18 @@
+import logging
+logging.basicConfig()
+logging.getLogger().setLevel(logging.INFO)
+
 import os
 import re
 import cv2
 import sys
 import time
-import socket
 import zipfile
 import requests
 import argparse
 import traceback
 import numpy as np
 import configparser
-import logging
 from urllib.request import Request, urlopen
 from pathlib import Path
 
@@ -34,6 +36,7 @@ def get_args():
     parser.add_argument("--test-path", default='./', help="Path to store files in test mode.")
     parser.add_argument("--exit-on-done", action="store_true", help="Exit when no more data from server.")
     parser.add_argument("--time-limit", default=-1, type=float, help="Exit when runing longer than time-limit hours.")
+    parser.add_argument("--page-pooling-delay", default=2, type=float, help="Delay between queries for processing.")
     parser.add_argument("--min-confidence", default=0.66, type=float,
                         help="Lines with lower confidence will be discarded.")
 
@@ -42,6 +45,17 @@ def get_args():
     return args
 
 
+def timeit(func):
+    def timed(*args, **kwargs):
+        ts = time.time()
+        result = func(*args, **kwargs)
+        elapsed = time.time() - ts
+        logging.info(f'{func.__name__} {elapsed:.3f} s')
+        return result
+    return timed
+
+
+@timeit
 def get_engine(session, config, engine_id):
     r = session.get(join_url(config['SERVER']['base_url'],
                               config['SERVER']['get_download_engine'],
@@ -84,8 +98,8 @@ def get_score(page_layout):
     else:
         return np.quantile(line_quantiles, .50)
 
-def post_error()
 
+@timeit
 def get_request(config, session):
     try:
         r = session.get(join_url(config['SERVER']['base_url'],
@@ -109,117 +123,85 @@ def get_request(config, session):
     return page_id, page_url, engine_id
 
 
-    def get_image():
-        try:
-            req = Request(page_url)
-            req.add_header('User-Agent',
-                           'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.11 (KHTML, like Gecko) Chrome/23.0.1271.64 Safari/537.11')
-            req.add_header('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
-            if config['SERVER']['base_url'] in page_url:
-                req.add_header('api-key', config['SETTINGS']['api_key'])
-            page = urlopen(req).read()
-        except KeyboardInterrupt:
-            traceback.print_exc()
-            print('Terminated by user.')
-            sys.exit()
-        except:
-            exception = traceback.format_exc()
-            headers = {'api-key': config['SETTINGS']['api_key'],
-                       'type': 'NOT_FOUND',
-                       'engine-version': engine_version}
-            session.post(
-                join_url(config['SERVER']['base_url'], config['SERVER']['post_failed_processing'], page_id),
-                data=exception.encode('utf-8'),
-                headers=headers)
-            continue
-
-        # Decode image
-        # Download image from url.
-        try:
-            encoded_img = np.frombuffer(page, dtype=np.uint8)
-            image = cv2.imdecode(encoded_img, flags=cv2.IMREAD_ANYCOLOR)
-            if len(image.shape) == 2:
-                image = np.stack([image, image, image], axis=2)
-        except KeyboardInterrupt:
-            traceback.print_exc()
-            print('Terminated by user.')
-            sys.exit()
-        except:
-            exception = traceback.format_exc()
-            headers = {'api-key': config['SETTINGS']['api_key'],
-                       'type': 'INVALID_FILE',
-                       'engine-version': engine_version}
-            session.post(
-                join_url(config['SERVER']['base_url'], config['SERVER']['post_failed_processing'], page_id),
-                data=exception,
-                headers=headers)
-            continue
-
-        # Process image
-        try:
-            page_layout = PageLayout(id=page_id, page_size=(image.shape[0], image.shape[1]))
-            page_layout = page_parser.process_page(image, page_layout)
-
-        except KeyboardInterrupt:
-            traceback.print_exc()
-            print('Terminated by user.')
-            sys.exit()
-        except:
-            exception = traceback.format_exc()
-            headers = {'api-key': config['SETTINGS']['api_key'],
-                       'type': 'PROCESSING_FAILED',
-                       'engine-version': engine_version,
-                       'hostname': socket.gethostname(),
-                       'ip-address': socket.gethostbyname(socket.gethostname())}
-            session.post(
-                join_url(config['SERVER']['base_url'], config['SERVER']['post_failed_processing'], page_id),
-                data=exception,
-                headers=headers)
-            continue
-        else:
-            ocr_processing = create_ocr_processing_element(id="IdOcr",
-                                                           software_creator_str="Project PERO",
-                                                           software_name_str="{}".format(engine_name),
-                                                           software_version_str="{}".format(engine_version),
-                                                           processing_datetime=None)
-
-            alto_xml = page_layout.to_altoxml_string(ocr_processing=ocr_processing,
-                                                     min_line_confidence=args.min_confidence)
-
-            if args.min_confidence > 0:
-                for region in page_layout.regions:
-                    region.lines = \
-                        [l for l in region.lines if
-                         l.transcription_confidence and l.transcription_confidence > args.min_confidence]
-
-            for line in page_layout.lines_iterator():
-                if arabic_helper.is_arabic_line(line.transcription):
-                    line.transcription = arabic_helper.label_form_to_string(line.transcription)
-            page_xml = page_layout.to_pagexml_string()
-            text = get_page_layout_text(page_layout)
-
-            if args.test_mode:
-                with open(os.path.join(args.test_path, '{}_alto.xml'.format(page_id)), "w") as file:
-                    file.write(alto_xml)
-                with open(os.path.join(args.test_path, '{}_page.xml'.format(page_id)), "w") as file:
-                    file.write(page_xml)
-                with open(os.path.join(args.test_path, '{}.txt'.format(page_id)), "w") as file:
-                    file.write(text)
-            else:
-                headers = {'api-key': config['SETTINGS']['api_key'],
-                           'engine-version': engine_version,
-                           'score': str(get_score(page_layout))}
-                session.post(join_url(config['SERVER']['base_url'], config['SERVER']['post_upload_results'], page_id),
-                             files={'alto': ('{}_alto.xml'.format(page_id), alto_xml, 'text/plain'),
-                                    'page': ('{}_page.xml'.format(page_id), page_xml, 'text/plain'),
-                                    'txt': ('{}.txt'.format(page_id), text, 'text/plain')},
-                             headers=headers)
-
+@timeit
+def get_image(page_url, config, session):
+    if config['SERVER']['base_url'] in page_url:
+        r = session.get(page_url, stream=True)
+        resp = r.raw
+        encoded_image = resp.read()
     else:
-        if args.exit_on_done:
-            break
-        time.sleep(10)
+        req = Request(page_url)
+        req.add_header('User-Agent',
+                       'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.11 (KHTML, like Gecko) Chrome/23.0.1271.64 Safari/537.11')
+        req.add_header('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8')
+        encoded_image = urlopen(req).read()
 
+    encoded_img = np.frombuffer(encoded_image, dtype=np.uint8)
+    image = cv2.imdecode(encoded_img, flags= cv2.IMREAD_COLOR)
+    return image
+
+
+@timeit
+def process_image(page_parser, image, page_id, args, engine_name, engine_version, arabic_helper):
+    # Process image
+    page_layout = PageLayout(id=page_id, page_size=(image.shape[0], image.shape[1]))
+    page_layout = page_parser.process_page(image, page_layout)
+
+    ocr_processing = create_ocr_processing_element(id="IdOcr",
+                                                   software_creator_str="Project PERO",
+                                                   software_name_str="{}".format(engine_name),
+                                                   software_version_str="{}".format(engine_version),
+                                                   processing_datetime=None)
+
+    alto_xml = page_layout.to_altoxml_string(ocr_processing=ocr_processing,
+                                             min_line_confidence=args.min_confidence)
+
+    if args.min_confidence > 0:
+        for region in page_layout.regions:
+            region.lines = \
+                [l for l in region.lines if
+                 l.transcription_confidence and l.transcription_confidence > args.min_confidence]
+
+    for line in page_layout.lines_iterator():
+        if arabic_helper.is_arabic_line(line.transcription):
+            line.transcription = arabic_helper.label_form_to_string(line.transcription)
+
+    page_xml = page_layout.to_pagexml_string()
+    text = get_page_layout_text(page_layout)
+
+    return page_layout, page_xml, alto_xml, text
+
+@timeit
+def send_results(args, config, session, page_id, engine_version, page_layout, page_xml, alto_xml, text):
+    if args.test_mode:
+        with open(os.path.join(args.test_path, '{}_alto.xml'.format(page_id)), "w") as file:
+            file.write(alto_xml)
+        with open(os.path.join(args.test_path, '{}_page.xml'.format(page_id)), "w") as file:
+            file.write(page_xml)
+        with open(os.path.join(args.test_path, '{}.txt'.format(page_id)), "w") as file:
+            file.write(text)
+    else:
+        headers = {'api-key': config['SETTINGS']['api_key'],
+                   'engine-version': engine_version,
+                   'score': str(get_score(page_layout))}
+        session.post(join_url(config['SERVER']['base_url'], config['SERVER']['post_upload_results'], page_id),
+                     files={'alto': ('{}_alto.xml'.format(page_id), alto_xml, 'text/plain'),
+                            'page': ('{}_page.xml'.format(page_id), page_xml, 'text/plain'),
+                            'txt': ('{}.txt'.format(page_id), text, 'text/plain')},
+                     headers=headers)
+
+
+def log_and_post_failure(session, config, engine_name,  engine_version, page_id, page_url, error_state):
+    exception = traceback.format_exc()
+    logging.error(f'Failed processing with engine {engine_name} - {engine_version} of page {page_id} - {page_url}. {exception}')
+
+    headers = {'api-key': config['SETTINGS']['api_key'],
+               'type': error_state,
+               'engine-version': engine_version}
+    session.post(
+        join_url(config['SERVER']['base_url'], config['SERVER']['post_failed_processing'], page_id),
+        data=exception.encode('utf-8'),
+        headers=headers)
 
 def main():
     args = get_args()
@@ -252,21 +234,43 @@ def main():
             logging.info(f'Stopping after reaching time limit. Running time {time.time() - start_time}s.')
             break
 
-        page_id, page_url, engine_id = get_request(config, session)
+        page_id, page_url, requested_engine_id = get_request(config, session)
         if not page_id:
-            logging.debug(f'No page to process.')
-            time.sleep(2)
+            logging.info(f'No page to process.')
+            if args.exit_on_done:
+                break
+            else:
+                time.sleep(args.page_pooling_delay)
+                continue
+
+        logging.info(f'Have page {page_id} {page_url} {requested_engine_id}.')
+
+        if loaded_engine_id != requested_engine_id:
+            page_parser, engine_name, engine_version = get_engine(session, config, requested_engine_id)
+            loaded_engine_id = requested_engine_id
+            logging.info(f'Loaded engine {loaded_engine_id} - {engine_name}.')
+        try:
+            error_state = 'INVALID_FILE'
+            image = get_image(page_url, config, session)
+            logging.info(f'Image {image.shape[1]}x{image.shape[0]}.')
+
+            error_state = 'PROCESSING_FAILED'
+            page_layout, page_xml, alto_xml, text = process_image(page_parser, image, page_id, args, engine_name, engine_version, arabic_helper)
+            send_results(args, config, session, page_id, engine_version, page_layout, page_xml, alto_xml, text)
+        except KeyboardInterrupt:
+            traceback.print_exc()
+            logging.info('Terminated by user.')
+            sys.exit()
+        except:
+            log_and_post_failure(session, config, engine_name, engine_version, page_id, page_url, error_state)
             continue
 
-        logging.debug(f'Have page {page_id} {page_url} {engine_id}.')
-
-        if loaded_engine_id != engine_id:
-            page_parser, engine_name, engine_version = get_engine(config, engine_id)
-            loaded_engine_id = engine_id
-            logging.info(f'Loaded engine {engine_id} - {engine_name}.')
-
-
-
+        lines = 0
+        chars = 0
+        for line in page_layout.lines_iterator():
+            lines += 1
+            chars += len(line.transcription)
+        logging.info(f'DONE lines {lines}, chars {chars}.')
 
 
 if __name__ == '__main__':
