@@ -126,6 +126,16 @@ def get_engine_by_page_id(page_id):
     return engine
 
 
+def get_usage_statistics(api_string, from_datetime=None, to_datetime=None):
+    pages = db_session.query(func.count(Page.id)).filter(Page.state.in_(['PROCESSED', 'EXPIRED'])).join(Request).join(ApiKey).filter(ApiKey.api_string == api_string)
+    if from_datetime:
+        pages = pages.filter(Page.finish_timestamp >= from_datetime)
+    if to_datetime:
+        pages = pages.filter(Page.finish_timestamp <= to_datetime)
+
+    return pages.first()[0]
+
+
 def get_page_statistics(history_hours=24):
     from_datetime = datetime.datetime.utcnow() - datetime.timedelta(hours=history_hours)
     finished_pages = db_session.query(Page).filter(Page.finish_timestamp > from_datetime).all()

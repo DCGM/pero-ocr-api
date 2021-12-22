@@ -2,6 +2,7 @@ import os
 import os.path
 import zipfile
 import datetime
+import dateutil.parser
 import traceback
 from io import BytesIO
 from urllib.parse import urlparse
@@ -18,7 +19,8 @@ from app.main.general import create_request, request_exists, cancel_request_by_i
                              request_belongs_to_api_key, get_engine_version, get_engine_by_page_id, \
                              change_page_to_processed, get_page_and_page_state, get_engine, get_latest_models, \
                              get_document_pages, change_page_to_failed, get_page_statistics, change_page_path, \
-                             get_request_by_page, get_notification, set_notification, get_api_key_by_id
+                             get_request_by_page, get_notification, set_notification, get_api_key_by_id, \
+                             get_usage_statistics
 from app.mail.mail import send_mail
 
 
@@ -55,6 +57,34 @@ def post_processing_request():
             return jsonify({
                 'status': 'failure',
                 'message': f'Engine {engine_id} has not been found.'}), 404
+
+
+@bp.route('/usage_statistics', methods=['GET'])
+@bp.route('/usage_statistics/<string:from_datetime>', methods=['GET'])
+@bp.route('/usage_statistics/<string:from_datetime>/<string:to_datetime>', methods=['GET'])
+@require_user_api_key
+def usage_statistics(from_datetime=None, to_datetime=None):
+    if from_datetime:
+        try:
+            from_datetime = dateutil.parser.isoparse(from_datetime)
+        except ValueError:
+            return 'from_time is not in a valid ISO format.', 400
+
+    if to_datetime:
+        try:
+            to_datetime = dateutil.parser.isoparse(to_datetime)
+        except ValueError:
+            return 'to_datetime is not in a valid ISO format.', 400
+
+    api_string = request.headers.get('api-key')
+    count = get_usage_statistics(api_string, from_datetime=from_datetime, to_datetime=to_datetime)
+    result = {'status': 'success', 'processed_pages': count}
+    if from_datetime:
+        result['from'] = from_datetime.isoformat()
+    if to_datetime:
+        result['to'] = to_datetime.isoformat()
+
+    return jsonify(result), 200
 
 
 @bp.route('/upload_image/<string:request_id>/<string:page_name>', methods=['POST'])
