@@ -79,7 +79,7 @@ def download_results(page_name, session, server_url, api_key, request_id, output
             print(r.text)
             continue
 
-        with open(file_path, 'w') as f:
+        with open(file_path, 'w', encoding='utf-8') as f:
             f.write(r.text)
 
 
