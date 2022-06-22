@@ -333,7 +333,7 @@ def download_engine(engine_id):
                 'message': 'Too many models for engine.'}), 500
 
     memory_file = BytesIO()
-    with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(memory_file, 'w', zipfile.ZIP_STORED) as zf:
         for model in models:
             for root, dirs, files in os.walk(os.path.join(app.config['MODELS_FOLDER'], model.name)):
                 for file in files:
