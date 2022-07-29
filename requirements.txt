@@ -1,0 +1,13 @@
+werkzeug== 2.0.3
+flask-sqlalchemy
+flask
+flask-bootstrap
+flask-jsglue2
+flask-dropzone
+flask-sqlalchemy-session
+apscheduler
+config
+psycopg2-binary
+drymail
+python-dateutil
+filelock
