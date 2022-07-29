@@ -68,7 +68,7 @@ class Page(Base):
     finish_timestamp = Column(DateTime(), nullable=True, index=True)
 
     request_id = Column(GUID(), ForeignKey('request.id'), nullable=False, index=True)
-    engine_version = Column(Integer(), ForeignKey('engine_version.id'), nullable=True, index=True)
+    engine_version = Column(String(), nullable=True)
 
     def __init__(self, name, url, state, request_id):
         self.name = name
@@ -76,51 +76,18 @@ class Page(Base):
         self.state = state
         self.request_id = request_id
 
-
+# Pipeline
 class Engine(Base):
     __tablename__ = 'engine'
     id = Column(Integer(), primary_key=True)
     name = Column(String(), nullable=False)
     description = Column(String(), nullable=True)
+    pipeline = Column(String(), nullable=False)  # list of stages
 
-    def __init__(self, name, description):
+    def __init__(self, name, description, pipeline):
         self.name = name
         self.description = description
-
-
-class EngineVersion(Base):
-    __tablename__ = 'engine_version'
-    id = Column(Integer(), primary_key=True)
-    version = Column(String(), nullable=False)
-    description = Column(String(), nullable=True)
-    engine_id = Column(Integer(), ForeignKey('engine.id'), nullable=False)
-
-    def __init__(self, version, engine_id, description=None):
-        self.version = version
-        self.engine_id = engine_id
-        self.description = description
-
-
-class EngineVersionModel(Base):
-    __tablename__ = 'engine_version_model'
-    id = Column(Integer(), primary_key=True)
-    engine_version_id = Column(Integer(), ForeignKey('engine_version.id'), nullable=False)
-    model_id = Column(Integer(), ForeignKey('model.id'), nullable=False)
-
-    def __init__(self, engine_version_id, model_id):
-        self.engine_version_id = engine_version_id
-        self.model_id = model_id
-
-
-class Model(Base):
-    __tablename__ = 'model'
-    id = Column(Integer(), primary_key=True)
-    name = Column(String(), nullable=False)
-    config = Column(String(), nullable=False)
-
-    def __init__(self, name, config):
-        self.name = name
-        self.config = config
+        self.pipeline = pipeline
 
 
 class Notification(Base):
@@ -148,67 +115,9 @@ if __name__ == '__main__':
     db_session.add(engine_1)
     db_session.commit()
 
-    engine_version_1_1 = EngineVersion('v0.0.1', engine_1.id)
-    db_session.add(engine_version_1_1)
-    db_session.commit()
-
     engine_2 = Engine('Engine_2', 'description')
     db_session.add(engine_2)
     db_session.commit()
-
-    engine_version_2_1 = EngineVersion('v0.0.1', engine_2.id)
-    db_session.add(engine_version_2_1)
-    db_session.commit()
-
-    engine_version_1_2 = EngineVersion('v0.0.2', engine_1.id)
-    db_session.add(engine_version_1_2)
-    db_session.commit()
-
-    model_1 = Model('lidove_noviny',
-                    ('[LINE_CROPPER]\n'
-                     'INTERP = 2\n'
-                     'LINE_SCALE = 1\n'
-                     'LINE_HEIGHT = 40\n'
-                     '\n'
-                     '[OCR]\n'
-                     'METHOD = pytorch_ocr\n'
-                     'OCR_JSON = ./lidove_noviny/ocr_engine.json\n'))
-    db_session.add(model_1)
-    db_session.commit()
-
-    model_2 = Model('universal',
-                    ('[LAYOUT_PARSER]\n'
-                    'METHOD = LAYOUT_CNN\n'
-                    'MODEL_PATH = ./universal/ParseNet_exported\n'
-                    'USE_CPU = yes\n'
-                    '\n'
-                    'DETECT_LINES = yes\n'
-                    'DETECT_REGIONS = no\n'
-                    'MERGE_LINES = no\n'
-                    'ADJUST_HEIGHTS = no\n'
-                    '\n'
-                    'MAX_MEGAPIXELS = 5\n'
-                    'GPU_FRACTION = 0.5\n'
-                    'DOWNSAMPLE = 4\n'
-                    'PAD = 52\n'
-                    'DETECTION_THRESHOLD = 0.2\n'))
-    db_session.add(model_2)
-    db_session.commit()
-
-    engine_version_model_1 = EngineVersionModel(engine_version_1_1.id, model_1.id)
-    db_session.add(engine_version_model_1)
-    engine_version_model_2 = EngineVersionModel(engine_version_1_1.id, model_2.id)
-    db_session.add(engine_version_model_2)
-
-    engine_version_model_3 = EngineVersionModel(engine_version_2_1.id, model_1.id)
-    db_session.add(engine_version_model_3)
-    engine_version_model_4 = EngineVersionModel(engine_version_2_1.id, model_2.id)
-    db_session.add(engine_version_model_4)
-
-    engine_version_model_5 = EngineVersionModel(engine_version_1_2.id, model_1.id)
-    db_session.add(engine_version_model_5)
-    engine_version_model_6 = EngineVersionModel(engine_version_1_2.id, model_2.id)
-    db_session.add(engine_version_model_6)
 
     api_key = ApiKey('test_user', 'Owner of The Key', Permission.SUPER_USER)
     db_session.add(api_key)
