@@ -31,7 +31,7 @@ def create_app():
 
     scheduler = BackgroundScheduler()
     scheduler.start()
-    scheduler.add_job(processing_timeout, 'interval', seconds=60)
+    scheduler.add_job(processing_timeout, 'interval', seconds=60)  # TODO
     scheduler.add_job(old_files_removals, 'interval', hours=24)
 
     Path(app.config['PROCESSED_REQUESTS_FOLDER']).mkdir(parents=True, exist_ok=True)
@@ -39,7 +39,7 @@ def create_app():
     Path(app.config['UPLOAD_IMAGES_FOLDER']).mkdir(parents=True, exist_ok=True)
 
     Bootstrap(app)
-    Dropzone(app)
+    Dropzone(app)  # TODO - vyzkoušet + zrušit pokud je to blbost (web stránka aplikace)
 
     notification = db_session.query(Notification).first()
     if notification is not None:

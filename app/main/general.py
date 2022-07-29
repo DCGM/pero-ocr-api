@@ -4,8 +4,7 @@ import sqlalchemy
 from sqlalchemy import func
 from collections import defaultdict
 
-from app.db.model import Request, Engine, Page, PageState, ApiKey, EngineVersion, Model, EngineVersionModel, \
-                         PageState, Notification
+from app.db.model import Request, Engine, Page, PageState, ApiKey, PageState, Notification
 from flask_sqlalchemy_session import current_session as db_session
 from flask import current_app as app
 
@@ -67,8 +66,7 @@ def get_engine_dict():
     engines = db_session.query(Engine).all()
     engines_dict = dict()
     for engine in engines:
-        engine_version, models = get_latest_models(engine.id)
-        engines_dict[engine.name] = {'id': engine.id, 'description': engine.description, 'engine_version': engine_version.version, 'models': [{'id': model.id, 'name': model.name} for model in models]}
+        engines_dict[engine.name] = {'id': engine.id, 'description': engine.description, 'stages': engine.stages}
 
     return engines_dict
 
@@ -107,15 +105,6 @@ def request_belongs_to_api_key(api_key, request_id):
     api_key = db_session.query(ApiKey).filter(ApiKey.api_string == api_key).first()
     request = db_session.query(Request).filter(Request.api_key_id == api_key.id).filter(Request.id == request_id).first()
     return request
-
-
-def get_engine_version(engine_id, version_name):
-    engine_version = db_session.query(EngineVersion)\
-        .filter(EngineVersion.version == version_name)\
-        .filter(EngineVersion.engine_id == engine_id)\
-        .first()
-
-    return engine_version
 
 
 def get_engine_by_page_id(page_id):
@@ -214,15 +203,6 @@ def get_page_and_page_state(request_id, name):
 def get_engine(engine_id):
     engine = db_session.query(Engine).filter(Engine.id == engine_id).first()
     return engine
-
-
-def get_latest_models(engine_id):
-    engine_version = db_session.query(EngineVersion).filter(EngineVersion.engine_id == engine_id).order_by(EngineVersion.id.desc()).first()
-    models = db_session.query(Model)\
-                       .outerjoin(EngineVersionModel)\
-                       .filter(EngineVersionModel.engine_version_id == engine_version.id)\
-                       .all()
-    return engine_version, models
 
 
 def get_document_pages(request_id):
