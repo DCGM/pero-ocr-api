@@ -52,7 +52,7 @@ def get_document_status(request_id):
 
 def cancel_request_by_id(request_id):
     waiting_pages = db_session.query(Page).filter(Page.request_id == request_id) \
-                                          .filter(Page.state.in_([PageState.CREATED, PageState.WAITING, PageState.PROCESSING]))\
+                                          .filter(Page.state.in_([PageState.CREATED, PageState.WAITING]))\
                                           .all()
 
     timestamp = datetime.datetime.utcnow()
@@ -66,7 +66,7 @@ def get_engine_dict():
     engines = db_session.query(Engine).all()
     engines_dict = dict()
     for engine in engines:
-        engines_dict[engine.name] = {'id': engine.id, 'description': engine.description, 'stages': engine.stages}
+        engines_dict[engine.name] = {'id': engine.id, 'description': engine.description, 'stages': engine.pipeline}
 
     return engines_dict
 

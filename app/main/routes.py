@@ -119,9 +119,9 @@ def upload_image(request_id, page_name):
     extension = os.path.splitext(file.filename)[1][1:].lower()
     if file and extension in app.config['ALLOWED_IMAGE_EXTENSIONS']:
         Path(os.path.join(app.config['UPLOAD_IMAGES_FOLDER'], str(page.request_id))).mkdir(parents=True, exist_ok=True)
-        file.save(os.path.join(app.config['UPLOAD_IMAGES_FOLDER'], str(page.request_id), page_name + '.' + extension))
+        file.save(os.path.join(app.config['UPLOAD_IMAGES_FOLDER'], str(page.request_id), page_name))
         o = urlparse(request.base_url)
-        path = f'{o.scheme}://{o.netloc}{app.config["APPLICATION_ROOT"]}/download_image/{request_id}/{page_name}.{extension}'
+        path = f'{o.scheme}://{o.netloc}{app.config["APPLICATION_ROOT"]}/download_image/{request_id}/{page_name}'
         change_page_path(request_id, page_name, path)
         return jsonify({
             'status': 'success'})
@@ -196,7 +196,7 @@ def download_results(request_id, page_name, format):
 
     try:
         with FileLock(os.path.join(app.config['PROCESSED_REQUESTS_FOLDER'], str(page.request_id), str(page.request_id)+'_lock'), timeout=1):
-            archive = zipfile.ZipFile(os.path.join(app.config['PROCESSED_REQUESTS_FOLDER'], str(request_.id), str(request_.id)+'.zip'), 'r')
+            archive = zipfile.ZipFile(os.path.join(app.config['PROCESSED_REQUESTS_FOLDER'], str(request_.id), str(page.id)+'.zip'), 'r')
             if format == 'alto':
                 data = archive.read('{}_alto.xml'.format(page.name))
                 extension = 'xml'
@@ -207,7 +207,7 @@ def download_results(request_id, page_name, format):
                 data = archive.read('{}.txt'.format(page.name))
                 extension = 'txt'
     except Timeout:
-        archive = zipfile.ZipFile(os.path.join(app.config['PROCESSED_REQUESTS_FOLDER'], str(request_.id), str(request_.id) + '.zip'), 'r')
+        archive = zipfile.ZipFile(os.path.join(app.config['PROCESSED_REQUESTS_FOLDER'], str(request_.id), str(page.id) + '.zip'), 'r')
         if format == 'alto':
             data = archive.read('{}_alto.xml'.format(page.name))
             extension = 'xml'
