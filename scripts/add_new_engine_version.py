@@ -1,4 +1,5 @@
 import os
+import sys
 import argparse
 
 from pathlib import Path
@@ -9,7 +10,7 @@ from app.db import Base
 from sqlalchemy import create_engine
 from sqlalchemy.orm import scoped_session, sessionmaker
 
-from app.db.model import Engine, EngineVersion, Model, EngineVersionModel
+from app.db.model import Engine
 from config import Config
 
 
@@ -25,21 +26,32 @@ def get_args():
     """
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("-e", "--engine", default=None,
-                        help="Engine ID for existing engine.")
-    parser.add_argument("--engine_name", default=None,
-                        help="Required for creating new engine, when -e not declared.")
-    parser.add_argument("--engine_description", default=None,
-                        help="Voluntary for creating new engine, when -e not declared.")
-    parser.add_argument("--engine_version_name", default=None,
-                        help="Voluntary for creating new engine_version, otherwise %Y-%m-%d is used as a name.")
-    parser.add_argument("--engine_version_description", default=None,
-                        help="Voluntary for creating new engine_version.")
-    parser.add_argument("-d", "--database", required=True)
-    parser.add_argument("-m", "--models", required=True, nargs='+',
-                        help="List of models for new engine version. Model can be model ID (int) or path to folder "
-                             "containing model files and config.ini used as a config in DB. Folder name will be used "
-                             "as model name.")
+    parser.add_argument(
+        "-e", "--engine",
+        help="Engine ID for existing engine.",
+        default=None
+    )
+    parser.add_argument(
+        "-n", "--engine_name",
+        help="Required for creating new engine, when -e not declared.",
+        default=None
+    )
+    parser.add_argument(
+        "-s", "--engine_description",
+        help="Voluntary for creating new engine, when -e not declared.",
+        default=None
+    )
+    parser.add_argument(
+        "-t", "--engine_stages",
+        help="Processing pipeline stages for given engine. Required for creating new engine.",
+        nargs='+',
+        default=[]
+    )
+    parser.add_argument(
+        "-d", "--database",
+        help="URL of database to connect to. Required argument!",
+        required=True
+    )
 
     args = parser.parse_args()
 
@@ -52,25 +64,19 @@ if __name__ == '__main__':
     engine = args.engine
     engine_name = args.engine_name
     engine_description = args.engine_description
+    engine_pipeline = ','.join(args.engine_stages)
 
-    engine_version_name = args.engine_version_name
-    engine_version_description = args.engine_version_description
-
-    models = args.models
-
-    # check validity of models
-    if len(models) < 2 and len(models) > 3:
-        print("Bad model count.")
-        exit(-1)
-
-    for model in models:
-        if not model.isdecimal() and not os.path.isdir(model):
-            print("Bad model specification.")
-            exit(-1)
+    if not engine:
+        if not engine_pipeline:
+            raise ValueError('Engine stages are required for creating new engine!')
+        if not engine_name:
+            raise ValueError('Engine name required for creating new engine!')
+    
+    if engine and not engine_name and not engine_description and not engine_pipeline:
+        sys.exit(0)
 
     # connect DB
     db_engine = create_engine(f'{args.database}',
-                           convert_unicode=True,
                            connect_args={})
     db_session = scoped_session(sessionmaker(autocommit=False,
                                              autoflush=False,
@@ -80,37 +86,16 @@ if __name__ == '__main__':
 
     # get or create engine
     if engine is None:
-        db_engine = Engine(engine_name, engine_description)
-        db_session.add(db_engine)
-        db_session.commit()
+        new_engine = Engine(engine_name, engine_description, engine_pipeline)
+        db_session.add(new_engine)
     else:
-        db_engine = db_session.query(Engine).filter(Engine.id == engine).first()
-
-    # create new engine version
-    if args.engine_version_name is None:
-        today = date.today()
-        engine_version_name = today.strftime("%Y-%m-%d")
-    engine_version = EngineVersion(engine_version_name, db_engine.id, engine_version_description)
-    db_session.add(engine_version)
-
-    # create new models
-    db_models = []
-    for model in models:
-        if model.isdecimal():
-            db_models.append(db_session.query(Model).filter(Model.id == int(model)).first())
-        else:
-            name = os.path.basename(os.path.normpath(model))
-            config = Path(os.path.join(model, 'config.ini')).read_text()
-            db_model = Model(name, config)
-            db_session.add(db_model)
-            db_models.append(db_model)
-            Path(os.path.join(Config.MODELS_FOLDER, name)).mkdir(parents=True, exist_ok=True)
-            copy_tree(model, os.path.join(Config.MODELS_FOLDER, name))
-
-    # connect models to engine version
-    db_session.commit()
-    for model in db_models:
-        engine_version_model = EngineVersionModel(engine_version.id, model.id)
-        db_session.add(engine_version_model)
-
+        new_engine = db_session.query(Engine).filter(Engine.id == engine).first()
+        if not new_engine:
+            raise ValueError(f'No engine with ID {engine}!')
+        if engine_name:
+            new_engine.name = engine_name
+        if engine_description:
+            new_engine.description = engine_description
+        if engine_pipeline:
+            new_engine.pipeline = engine_pipeline
     db_session.commit()
