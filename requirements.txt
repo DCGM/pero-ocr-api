@@ -11,3 +11,11 @@ psycopg2-binary
 drymail
 python-dateutil
 filelock
+requests
+
+# worker adapter
+kazoo
+pure-sasl
+pika
+protobuf
+python-magic
