@@ -31,7 +31,7 @@ def create_app():
 
     scheduler = BackgroundScheduler()
     scheduler.start()
-    scheduler.add_job(processing_timeout, 'interval', seconds=60)  # TODO
+    #scheduler.add_job(processing_timeout, 'interval', seconds=60)  # TODO
     scheduler.add_job(old_files_removals, 'interval', hours=24)
 
     Path(app.config['PROCESSED_REQUESTS_FOLDER']).mkdir(parents=True, exist_ok=True)
@@ -128,7 +128,7 @@ def old_files_removals():
         db_session = session_factory()
         pages = db_session.query(Page).outerjoin(Request)\
                           .filter(Request.finish_timestamp < timestamp) \
-                          .filter(Page.state == PageState.PROCESSED) \
+                          .filter(Page.state.in_[PageState.PROCESSED, PageState.CANCELED]) \
                           .all()
         for page in pages:
             page.state = PageState.EXPIRED
