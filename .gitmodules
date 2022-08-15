@@ -1,0 +1,3 @@
+[submodule "pero-worker-libs"]
+	path = pero-worker-libs
+	url = git@github.com:DCGM/pero-worker-libs.git
