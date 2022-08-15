@@ -3,11 +3,11 @@
 # Worker adapter - connects api to workers via Apache Zookeeper and RabbitMQ
 # Sends processing requests to worker system and receives processed results
 
-import worker_libs.worker_functions.connection_aux_functions as cf
-import worker_libs.worker_functions.constants as constants
-from worker_libs.worker_functions.zk_client import ZkClient
-from worker_libs.worker_functions.mq_client import MQClient
-from worker_libs.message_definitions.message_pb2 import ProcessingRequest, StageLog, Data
+import pero_worker_libs.worker_functions.connection_aux_functions as cf
+import pero_worker_libs.worker_functions.constants as constants
+from pero_worker_libs.worker_functions.zk_client import ZkClient
+from pero_worker_libs.worker_functions.mq_client import MQClient
+from pero_worker_libs.message_definitions.message_pb2 import ProcessingRequest, StageLog, Data
 
 from app.db import model as db_model
 from google.protobuf.timestamp_pb2 import Timestamp
