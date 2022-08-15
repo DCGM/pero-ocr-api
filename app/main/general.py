@@ -34,7 +34,8 @@ def create_request(api_string, json_request):
             if json_request["images"][image_name] is None:
                 page = Page(image_name, None, PageState.CREATED, request.id)
             else:
-                page = Page(image_name, json_request["images"][image_name], PageState.WAITING, request.id)
+                page = Page(image_name, json_request["images"][image_name], PageState.WAITING, request.id,
+                            waiting_timestamp=datetime.datetime.utcnow())
             db_session.add(page)
         db_session.commit()
         return request, engine_id
@@ -85,13 +86,24 @@ def check_save_path(request_id):
 
 
 def get_page_by_preferred_engine(engine_id):
-    page = db_session.query(Page).join(Request).join(ApiKey).filter(Page.state == PageState.WAITING)\
-                                                            .filter(Request.engine_id == engine_id)\
-                                                            .filter(ApiKey.suspension == False).first()
-    if not page:
-        page = db_session.query(Page).join(Request).join(ApiKey).filter(ApiKey.suspension == False)\
-                                                  .filter(Page.state == PageState.WAITING).first()
+    # Get page for preferred engine
+    page = None
+    if engine_id is not None:
+        page = db_session.query(Page).join(Request).join(ApiKey)\
+            .filter(Page.state == PageState.WAITING)\
+            .filter(Request.engine_id == engine_id)\
+            .filter(ApiKey.suspension == False) \
+            .order_by(ApiKey.priority.desc(), Page.waiting_timestamp.asc())\
+            .first()
 
+    if not page:
+        # Get page for any engine
+        page = db_session.query(Page).join(Request).join(ApiKey).filter(ApiKey.suspension == False)\
+               .filter(Page.state == PageState.WAITING)\
+               .order_by(ApiKey.priority.desc(), Page.waiting_timestamp.asc())\
+               .first()
+
+        # get engine for the page
         if page:
             engine_id = db_session.query(Request.engine_id).filter(Request.id == page.request_id).first()[0]
 
@@ -234,6 +246,7 @@ def change_page_path(request_id, page_name, new_url):
     page = db_session.query(Page).filter(Page.request_id == request_id).filter(Page.name == page_name).first()
     page.url = new_url
     page.state = PageState.WAITING
+    page.waiting_timestamp = datetime.datetime.utcnow()
     db_session.commit()
 
 

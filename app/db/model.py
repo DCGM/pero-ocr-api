@@ -34,6 +34,7 @@ class ApiKey(Base):
     owner = Column(String(), nullable=False)
     permission = Column(Enum(Permission), nullable=False)
     suspension = Column(Boolean(), nullable=False, default=False)
+    priority = Column(Integer(), nullable=False, default=1)
 
     def __init__(self, api_string, owner, permission):
         self.api_string = api_string
@@ -64,17 +65,19 @@ class Page(Base):
     state = Column(Enum(PageState), nullable=False, index=True)
     score = Column(Float(), nullable=True, index=True)
     traceback = Column(String(), nullable=True)
+    waiting_timestamp = Column(DateTime(), nullable=True, index=True)
     processing_timestamp = Column(DateTime(), nullable=True)
     finish_timestamp = Column(DateTime(), nullable=True, index=True)
 
     request_id = Column(GUID(), ForeignKey('request.id'), nullable=False, index=True)
     engine_version = Column(Integer(), ForeignKey('engine_version.id'), nullable=True, index=True)
 
-    def __init__(self, name, url, state, request_id):
+    def __init__(self, name, url, state, request_id, waiting_timestamp=None):
         self.name = name
         self.url = url
         self.state = state
         self.request_id = request_id
+        self.waiting_timestamp = waiting_timestamp
 
 
 class Engine(Base):
