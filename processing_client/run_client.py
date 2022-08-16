@@ -15,6 +15,7 @@ import numpy as np
 import configparser
 from urllib.request import Request, urlopen
 from pathlib import Path
+import torch
 
 from pero_ocr.document_ocr.page_parser import PageParser
 from pero_ocr.document_ocr.layout import PageLayout, create_ocr_processing_element
@@ -206,6 +207,10 @@ def log_and_post_failure(session, config, engine_name,  engine_version, page_id,
 def main():
     args = get_args()
 
+    if not torch.cuda.is_available():
+        logging.error('Cuda is not available.')
+        exit(-1)
+
     start_time = time.time()
 
     config = configparser.ConfigParser()
@@ -271,6 +276,7 @@ def main():
             lines += 1
             chars += len(line.transcription)
         logging.info(f'DONE lines {lines}, chars {chars}.')
+        torch.cuda.empty_cache()
 
 
 if __name__ == '__main__':
