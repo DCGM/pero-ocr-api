@@ -9,9 +9,12 @@ from worker_functions.zk_client import ZkClient
 from worker_functions.mq_client import MQClient
 from message_definitions.message_pb2 import ProcessingRequest, StageLog, Data
 
+from pero_ocr.document_ocr.layout import PageLayout
+
 from app.db import model as db_model
 from google.protobuf.timestamp_pb2 import Timestamp
 import sqlalchemy
+import numpy as np
 
 import kazoo
 import pika
@@ -205,7 +208,6 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         page.finish_timestamp = timestamp
         request.modification_timestamp = timestamp
 
-        print(page)
         self.db_session.commit()
         if self.db_is_request_processed(request.id):
             request.finish_timestamp = timestamp
@@ -262,6 +264,22 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         
         self.mq_channel.confirm_delivery()
     
+    def get_score(self, page_layout):
+        """
+        Returns transcription confidence 'score'.
+        Score is calculated as median from score of each line.
+        :param page_layout: page layout object of given page
+        :returns: page score
+        """
+        line_quantiles = []
+        for line in page_layout.lines_iterator():
+            if line.transcription_confidence is not None:
+                line_quantiles.append(line.transcription_confidence)
+        if not line_quantiles:
+            return 1.0
+        else:
+            return np.quantile(line_quantiles, .50)
+    
     def _mq_receive_result_callback(self, channel, method, properties, body):
         """
         Callback function for receiving processed messages from message broker
@@ -307,29 +325,49 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
             if not os.path.exists(output_folder):
                 os.mkdir(output_folder)
             
-            page_name = None
+            page_img = None
+            page_xml = None
+            page_logits = None
 
-            for result in processing_request.results:
+            # get file references
+            for i, result in enumerate(processing_request.results):
                 ext = os.path.splitext(result.name)[1]
                 datatype = magic.from_buffer(result.content, mime=True)
                 if datatype.split('/')[0] == 'image':  # recognize image
-                    page_name = result.name
-                    continue
-                try:
-                    with FileLock(lock_file=lock_path, timeout=20):
-                        if ext == '.xml':
-                            with zipfile.ZipFile(zip_path, 'a', zipfile.ZIP_DEFLATED) as zipf:
-                                zipf.writestr(result.name, result.content.decode())
-                        if ext == '.logits':
-                            with zipfile.ZipFile(logits_path, 'a', zipfile.ZIP_DEFLATED) as zipf:
-                                zipf.writestr(result.name, result.content)
-                except Timeout as e:
-                    self.logger.error('Failed to write XML file to zip file for page {page}'.format(page = processing_request.page_uuid))
-                    raise
-            # TODO
+                    page_img = processing_request.results[i]
+                elif ext =='.xml':
+                    page_xml = processing_request.results[i]
+                elif ext == '.logits':
+                    page_logits = processing_request.results[i]
+
+            page_layout = PageLayout()
+            page_layout.from_pagexml_string(page_xml.content)
+
             # generate altoxml format
+            alto_xml = page_layout.to_altoxml_string(
+                ocr_processing=None,  # TODO
+                page_uuid=processing_request.page_uuid
+            )
             # calculate score - from xml
-            score = None
+            score = self.get_score(page_layout)
+            # save results
+            try:
+                with FileLock(lock_file=lock_path, timeout=30):
+                    with zipfile.ZipFile(zip_path, 'a', zipfile.ZIP_DEFLATED) as zipf:
+                        zipf.writestr('{}_page.xml'.format(page_img.name), page_xml.content.decode())
+                        zipf.writestr('{}_page.logits'.format(page_img.name), page_logits.content)
+                        zipf.writestr('{}_alto.xml'.format(page_img.name), alto_xml)
+            except Timeout as e:
+                self.logger.error('Failed to write XML file to zip file for page {page}'.format(page = processing_request.page_uuid))
+                self.db_change_page_to_failed(
+                    page_id=processing_request.page_uuid,
+                    fail_type='PROCESSING_FAILED',
+                    traceback=e,
+                    engine_version=engine_version
+                )
+                # TODO
+                # report failed processing by email and push notification to app
+                raise
             # change state to processed in database, save score, save engine version
             self.db_change_page_to_processed(
                 page_id=processing_request.page_uuid,
@@ -337,8 +375,8 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                 engine_version=engine_version
             )
             # remove image from config['UPLOAD_IMAGES_FOLDER']
-            if page_name:
-                image_path = os.path.join(self.config['APIConfig']['UPLOAD_IMAGES_FOLDER'], processing_request.page_uuid, '{}'.format(page_name))
+            if page_img.name:
+                image_path = os.path.join(self.config['APIConfig']['UPLOAD_IMAGES_FOLDER'], processing_request.page_uuid, '{}'.format(page_img.name))
                 if os.path.exists(image_path):
                     os.unlink(image_path)
         
