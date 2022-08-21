@@ -9,7 +9,7 @@ from worker_functions.zk_client import ZkClient
 from worker_functions.mq_client import MQClient
 from message_definitions.message_pb2 import ProcessingRequest, StageLog, Data
 
-from pero_ocr.document_ocr.layout import PageLayout
+from pero_ocr.document_ocr.layout import PageLayout, create_ocr_processing_element
 
 from app.db import model as db_model
 from google.protobuf.timestamp_pb2 import Timestamp
@@ -311,15 +311,14 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         zip_path = os.path.join(output_folder, processing_request.page_uuid + '.zip')
         logits_path = os.path.join(output_folder, processing_request.page_uuid + '.logits.zip')
         
-        # get status
+        # get status and engine version
         status = db_model.PageState.PROCESSED
+        engine_version = []
         for log in processing_request.logs:
+            engine_version.append(log.version)
             if log.status != 'OK':
                 status == db_model.PageState.PROCESSING_FAILED
-        
-        # TODO
-        # calculate engine version - needs changes in zookeeper
-        engine_version = None
+        engine_version = ','.join(engine_version)
 
         if status == db_model.PageState.PROCESSED:  # processing OK
             if not os.path.exists(output_folder):
@@ -342,19 +341,24 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
 
             page_layout = PageLayout()
             page_layout.from_pagexml_string(page_xml.content)
+            
+            # generate pagexml with version
+            page_xml_final = page_layout.to_pagexml_string(creator=engine_version)
 
             # generate altoxml format
             alto_xml = page_layout.to_altoxml_string(
-                ocr_processing=None,  # TODO
+                ocr_processing=create_ocr_processing_element(software_version_str=engine_version),
                 page_uuid=processing_request.page_uuid
             )
+
             # calculate score - from xml
             score = self.get_score(page_layout)
+
             # save results
             try:
                 with FileLock(lock_file=lock_path, timeout=30):
                     with zipfile.ZipFile(zip_path, 'a', zipfile.ZIP_DEFLATED) as zipf:
-                        zipf.writestr('{}_page.xml'.format(page_img.name), page_xml.content.decode())
+                        zipf.writestr('{}_page.xml'.format(page_img.name), page_xml_final)
                         zipf.writestr('{}_page.logits'.format(page_img.name), page_logits.content)
                         zipf.writestr('{}_alto.xml'.format(page_img.name), alto_xml)
             except Timeout as e:
