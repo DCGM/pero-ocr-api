@@ -11,6 +11,7 @@ from message_definitions.message_pb2 import ProcessingRequest, StageLog, Data
 
 from pero_ocr.document_ocr.layout import PageLayout, create_ocr_processing_element
 
+from app.mail.mail import send_mail
 from app.db import model as db_model
 from google.protobuf.timestamp_pb2 import Timestamp
 import sqlalchemy
@@ -32,6 +33,7 @@ import requests
 import datetime
 import configparser
 import argparse
+import traceback
 
 # Default logger settings (reuirede by kazoo library)
 log_formatter = logging.Formatter('%(asctime)s WORKER_ADAPTER %(levelname)s %(message)s')
@@ -78,23 +80,23 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         """
         # init ZkClient
         super(WorkerAdapter, self).__init__(
-            zookeeper_servers=config['AdapterConfig']['ZOOKEEPER_SERVERS'],
-            username=config['AdapterConfig']['USERNAME'],
-            password=config['AdapterConfig']['PASSWORD'],
-            ca_cert=config['AdapterConfig']['CA_CERT'],
+            zookeeper_servers=config['Adapter']['ZOOKEEPER_SERVERS'],
+            username=config['Adapter']['USERNAME'],
+            password=config['Adapter']['PASSWORD'],
+            ca_cert=config['Adapter']['CA_CERT'],
             logger=logger
         )
         # init MQClient
         super(ZkClient, self).__init__(
             mq_servers=[],
-            username=config['AdapterConfig']['USERNAME'],
-            password=config['AdapterConfig']['PASSWORD'],
-            ca_cert=config['AdapterConfig']['CA_CERT'],
+            username=config['Adapter']['USERNAME'],
+            password=config['Adapter']['PASSWORD'],
+            ca_cert=config['Adapter']['CA_CERT'],
             logger=logger
         )
         # init DBClient
         super(MQClient, self).__init__(
-            database_url=config['DBConfig']['database_url']
+            database_url=config['DB']['database_url']
         )
 
         # mq servers
@@ -111,6 +113,28 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         # del ZkClient
         super(WorkerAdapter, self).__del__()
         super(ZkClient, self).__del__()
+    
+    ### MAIL ###
+    def send_mail(subject, body):
+        """
+        Sends mail with given subject and body to addresses specified in cofiguration.
+        :param subject: mail subject
+        :param body: mail body
+        :nothrow
+        """
+        try:
+            if self.config['Mail']['NOTIFICATION_ADDRESSES']:
+                send_mail(
+                        subject=subject,
+                        body=body.replace("\n", "<br>"),
+                        sender=('PERO OCR - API BOT', self.config['Mail']['USERNAME']),
+                        password=self.config['Mail']['PASSWORD'],
+                        recipients=[ address.strip() for address in self.config['Mail']['NOTIFICATION_ADDRESSES'].split(',')],
+                        host=self.config['Mail']['SERVER']
+                    )
+        except Exception:
+            self.logger.error('Failed to send notification email!')
+            self.logger.debug(f'Received error:\n{traceback.format_exc()}')
     
     ### ZK ###
     def zk_callback_update_mq_servers(self, servers):
@@ -248,9 +272,9 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
             if retry_count != 0:
                 self.logger.warning(
                     'Failed to connect to MQ servers, waiting for {n} seconds to retry!'
-                    .format(n=int(self.config['AdapterConfig']['CONNECTION_RETRY_INTERVAL']))
+                    .format(n=int(self.config['Adapter']['CONNECTION_RETRY_INTERVAL']))
                 )
-                time.sleep(int(self.config['AdapterConfig']['CONNECTION_RETRY_INTERVAL']))
+                time.sleep(int(self.config['Adapter']['CONNECTION_RETRY_INTERVAL']))
 
             self.mq_servers = self.get_mq_servers()
             super().mq_connect()
@@ -306,7 +330,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         self.logger.debug(f'Request page: {processing_request.page_uuid}')
         self.logger.debug(f'Request stage: {current_stage}')
 
-        output_folder = os.path.join(self.config['APIConfig']['PROCESSED_REQUESTS_FOLDER'], processing_request.uuid)
+        output_folder = os.path.join(self.config['API']['PROCESSED_REQUESTS_FOLDER'], processing_request.uuid)
         lock_path = os.path.join(output_folder, processing_request.uuid + '_lock')
         zip_path = os.path.join(output_folder, processing_request.page_uuid + '.zip')
         logits_path = os.path.join(output_folder, processing_request.page_uuid + '.logits.zip')
@@ -369,8 +393,11 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                     traceback=e,
                     engine_version=engine_version
                 )
-                # TODO
-                # report failed processing by email and push notification to app
+                # send email notification
+                self.send_mail(
+                    subject='API Bot - PROCESSING ADAPTER ERROR',
+                    body=e
+                )
                 raise
             # change state to processed in database, save score, save engine version
             self.db_change_page_to_processed(
@@ -380,7 +407,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
             )
             # remove image from config['UPLOAD_IMAGES_FOLDER']
             if page_img.name:
-                image_path = os.path.join(self.config['APIConfig']['UPLOAD_IMAGES_FOLDER'], processing_request.page_uuid, '{}'.format(page_img.name))
+                image_path = os.path.join(self.config['API']['UPLOAD_IMAGES_FOLDER'], processing_request.page_uuid, '{}'.format(page_img.name))
                 if os.path.exists(image_path):
                     os.unlink(image_path)
         
@@ -391,8 +418,11 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                 traceback=processing_request.logs[-1].log,  # save log
                 engine_version=engine_version
             )
-            # TODO
-            # report failed processing by email and push notification to app
+            # send email notification
+            self.send_mail(
+                subject='API Bot - PROCESSING FAILED',
+                body=processing_request.logs[-1].log
+            )
 
         # acknowledge the message
         self.mq_channel.basic_ack(delivery_tag=method.delivery_tag)
@@ -424,7 +454,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
             except Exception as e:
                 # unrecoverable error - exit
                 self.logger.error('Result receiving failed!')
-                self.logger.debug('Received error: {}'.format(e))
+                self.logger.debug('Received error:\n{}'.format(traceback.format_exc()))
                 raise
 
     def mq_send_request(self, page, engine, output_queue):
@@ -439,7 +469,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         :raise: ConnectionError when image specified by url cannot be downloaded
         :raise: OSError when file specified by path can't be opened
         """
-        image_path = os.path.join(self.config['APIConfig']['UPLOAD_IMAGES_FOLDER'], str(page.request_id), page.name)
+        image_path = os.path.join(self.config['API']['UPLOAD_IMAGES_FOLDER'], str(page.request_id), page.name)
         # download image
         if not image_path:
             response = requests.get(url=page.url, verify=False, stream=True)
@@ -489,7 +519,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                 
                 # get maximum number of requests that can be uploaded
                 # (maximum number of requests - number of requests in processing)
-                upload_request_count = int(self.config['AdapterConfig']['MAX_REQUEST_COUNT']) - len(
+                upload_request_count = int(self.config['Adapter']['MAX_REQUEST_COUNT']) - len(
                     self.db_session.query(db_model.Page).join(db_model.Request).join(db_model.ApiKey) \
                     .filter(db_model.ApiKey.suspension == False) \
                     .filter(db_model.Page.state == db_model.PageState.PROCESSING) \
@@ -503,7 +533,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                                 .all()
                 if not waiting_pages or upload_request_count <= 0:
                     # wait for some time if no pages could be uploaded (to prevent agressive fetching from db)
-                    time.sleep(int(self.config['AdapterConfig']['DB_FETCH_INTERVAL']))
+                    time.sleep(int(self.config['Adapter']['DB_FETCH_INTERVAL']))
                 else:
                     # upload as many requests as possible
                     for page in waiting_pages:
@@ -528,6 +558,10 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                                 traceback = f'{e}',
                                 engine_version = None
                             )
+                            self.send_mail(
+                                subject='API Bot - Failed to upload request, bad route!',
+                                body=f'{e}'
+                            )
                         except pika.exceptions.AMQPError as e:
                             self.logger.error('Failed to upload processing request due to MQ connection error!')
                             self.logger.debug('Received error: {}'.format(e))
@@ -541,14 +575,23 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                                 traceback = f'{e}',
                                 engine_version = None
                             )
-                        except Exception as e:
+                            self.send_mail(
+                                subject='API Bot - Failed to upload request, page not found!',
+                                body=f'{e}'
+                            )
+                        except Exception:
+                            error = traceback.format_exc()
                             self.logger.error(f'Failed to upload page {page.id} to MQ!')
-                            self.logger.debug(f'Received error: {e}')
+                            self.logger.debug(f'Received error:\n{error}')
                             self.db_change_page_to_failed(
                                 page_id = page.id,
                                 fail_type = 'PROCESSING_FAILED',
-                                traceback = f'{e}',
+                                traceback = f'{error}',
                                 engine_version = None
+                            )
+                            self.send_mail(
+                                subject='API Bot - Failed to upload request!',
+                                body=f'{error}'
                             )
                         else:
                             # update page after successfull upload
@@ -574,7 +617,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         self.db_connect()
 
         # get queue
-        queue = self.config['AdapterConfig']['QUEUE']
+        queue = self.config['Adapter']['QUEUE']
 
         # run adapter
         if publisher:
