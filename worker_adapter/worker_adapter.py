@@ -219,12 +219,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         page = self.db_session.query(db_model.Page).filter(db_model.Page.id == page_id).first()
         request = self.db_session.query(db_model.Request).filter(db_model.Request.id == page.request_id).first()
 
-        if fail_type == 'NOT_FOUND':
-            page.state = db_model.PageState.NOT_FOUND
-        elif fail_type == 'INVALID_FILE':
-            page.state = db_model.PageState.INVALID_FILE
-        elif fail_type == 'PROCESSING_FAILED':
-            page.state = db_model.PageState.PROCESSING_FAILED
+        page.state = fail_type
         page.traceback = traceback
         page.engine_version = engine_version
 
@@ -339,10 +334,10 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         status = db_model.PageState.PROCESSED
         engine_version = []
         for log in processing_request.logs:
-            engine_version.append(log.version)
+            engine_version.append(f'{log.stage}: {log.version}')
             if log.status != 'OK':
                 status == db_model.PageState.PROCESSING_FAILED
-        engine_version = ','.join(engine_version)
+        engine_version = ', '.join(engine_version)
 
         if status == db_model.PageState.PROCESSED:  # processing OK
             if not os.path.exists(output_folder):
@@ -365,9 +360,10 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
 
             page_layout = PageLayout()
             page_layout.from_pagexml_string(page_xml.content)
+            page_layout.load_logits(page_logits.content)
             
             # generate pagexml with version
-            page_xml_final = page_layout.to_pagexml_string(creator=engine_version)
+            page_xml_final = page_layout.to_pagexml_string(creator=f'PERO OCR: {engine_version}')
 
             # generate altoxml format
             alto_xml = page_layout.to_altoxml_string(
@@ -379,26 +375,11 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
             score = self.get_score(page_layout)
 
             # save results
-            try:
-                with FileLock(lock_file=lock_path, timeout=30):
-                    with zipfile.ZipFile(zip_path, 'a', zipfile.ZIP_DEFLATED) as zipf:
-                        zipf.writestr('{}_page.xml'.format(page_img.name), page_xml_final)
-                        zipf.writestr('{}_page.logits'.format(page_img.name), page_logits.content)
-                        zipf.writestr('{}_alto.xml'.format(page_img.name), alto_xml)
-            except Timeout as e:
-                self.logger.error('Failed to write XML file to zip file for page {page}'.format(page = processing_request.page_uuid))
-                self.db_change_page_to_failed(
-                    page_id=processing_request.page_uuid,
-                    fail_type='PROCESSING_FAILED',
-                    traceback=e,
-                    engine_version=engine_version
-                )
-                # send email notification
-                self.send_mail(
-                    subject='API Bot - PROCESSING ADAPTER ERROR',
-                    body=e
-                )
-                raise
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                zipf.writestr('{}_page.xml'.format(page_img.name), page_xml_final)
+                zipf.writestr('{}_page.logits'.format(page_img.name), page_logits.content)
+                zipf.writestr('{}_alto.xml'.format(page_img.name), alto_xml)
+            
             # change state to processed in database, save score, save engine version
             self.db_change_page_to_processed(
                 page_id=processing_request.page_uuid,
@@ -414,7 +395,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         else:  # processing failed
             self.db_change_page_to_failed(
                 page_id=processing_request.page_uuid,
-                fail_type='PROCESSING_FAILED',
+                fail_type=db_model.PageState.PROCESSING_FAILED,
                 traceback=processing_request.logs[-1].log,  # save log
                 engine_version=engine_version
             )
@@ -534,70 +515,73 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                 if not waiting_pages or upload_request_count <= 0:
                     # wait for some time if no pages could be uploaded (to prevent agressive fetching from db)
                     time.sleep(int(self.config['Adapter']['DB_FETCH_INTERVAL']))
-                else:
-                    # upload as many requests as possible
-                    for page in waiting_pages:
-                        # exit if no more messages can be uploaded
-                        if upload_request_count <= 0:
-                            break
+                    continue
 
-                        # Add engine (pipeline)
-                        engine = self.db_session.query(db_model.Engine).join(db_model.Request).filter(db_model.Request.id == page.request_id).first()
+                # upload as many requests as possible
+                for page, i in zip(waiting_pages, range(upload_request_count)):
+                    # Add engine (pipeline)
+                    engine = self.db_session.query(db_model.Engine).join(db_model.Request).filter(db_model.Request.id == page.request_id).first()
 
-                        timestamp = None
+                    timestamp = None
 
-                        # upload request to MQ
-                        try:
-                            timestamp = self.mq_send_request(page, engine, output_queue)
-                        except pika.exceptions.UnroutableError as e:
-                            self.logger.error('Failed to upload processing request due to wrong route im MQ!')
-                            self.logger.debug('Received error: {}'.format(e))
-                            self.db_change_page_to_failed(
-                                page_id = page.id,
-                                fail_type = 'PROCESSING_FAILED',
-                                traceback = f'{e}',
-                                engine_version = None
-                            )
-                            self.send_mail(
-                                subject='API Bot - Failed to upload request, bad route!',
-                                body=f'{e}'
-                            )
-                        except pika.exceptions.AMQPError as e:
-                            self.logger.error('Failed to upload processing request due to MQ connection error!')
-                            self.logger.debug('Received error: {}'.format(e))
-                            break
-                        except (ConnectionError, OSError) as e:
-                            self.logger.error(f'Failed to upload page {page.id} to MQ, page not found!')
-                            self.logger.debug(f'Received error: {e}')
-                            self.db_change_page_to_failed(
-                                page_id = page.id,
-                                fail_type = 'NOT_FOUND',
-                                traceback = f'{e}',
-                                engine_version = None
-                            )
-                            self.send_mail(
-                                subject='API Bot - Failed to upload request, page not found!',
-                                body=f'{e}'
-                            )
-                        except Exception:
-                            error = traceback.format_exc()
-                            self.logger.error(f'Failed to upload page {page.id} to MQ!')
-                            self.logger.debug(f'Received error:\n{error}')
-                            self.db_change_page_to_failed(
-                                page_id = page.id,
-                                fail_type = 'PROCESSING_FAILED',
-                                traceback = f'{error}',
-                                engine_version = None
-                            )
-                            self.send_mail(
-                                subject='API Bot - Failed to upload request!',
-                                body=f'{error}'
-                            )
-                        else:
-                            # update page after successfull upload
-                            page.state = db_model.PageState.PROCESSING
-                            page.processing_timestamp = timestamp
-                            self.db_session.commit()
+                    # upload request to MQ
+                    try:
+                        timestamp = self.mq_send_request(page, engine, output_queue)
+                    except pika.exceptions.UnroutableError as e:
+                        self.logger.error(f'Failed to upload page {page.id} due to wrong route im MQ!')
+                        self.logger.debug(f'Received error: {e}')
+                        self.send_mail(
+                            subject='API Bot - Failed to upload request, bad route!',
+                            body=f'{e}'
+                        )
+                        time.sleep(int(self.config['Adapter']['DB_FETCH_INTERVAL']))
+                    except pika.exceptions.AMQPError as e:
+                        self.logger.error('Failed to upload processing request due to MQ connection error!')
+                        self.logger.debug('Received error: {}'.format(e))
+                        self.send_mail(
+                            subject='API Bot - Request upload failed!',
+                            body=f'{e}'
+                        )
+                        time.sleep(int(self.config['Adapter']['DB_FETCH_INTERVAL']))
+                        break
+                    except OSError as e:
+                        self.logger.error(f'Failed to upload page {page.id} to MQ, file not accessible!')
+                        self.logger.debug(f'Received error: {e}')
+                        self.send_mail(
+                            subject='API Bot - Failed to upload request, file not accessible!',
+                            body=f'{e}'
+                        )
+                        time.sleep(int(self.config['Adapter']['DB_FETCH_INTERVAL']))
+                    except ConnectionError as e:
+                        self.logger.error(f'Failed to upload page {page.id} to MQ, page not found!')
+                        self.logger.debug(f'Received error: {e}')
+                        self.db_change_page_to_failed(
+                            page_id = page.id,
+                            fail_type = db_model.PageState.NOT_FOUND,
+                            traceback = f'{e}',
+                            engine_version = None
+                        )
+                        self.send_mail(
+                            subject='API Bot - Failed to upload request, page not found!',
+                            body=f'{e}'
+                        )
+                    except KeyboardInterrupt:
+                        raise
+                    except Exception:
+                        error = traceback.format_exc()
+                        self.logger.error(f'Failed to upload page {page.id} to MQ!')
+                        self.logger.debug(f'Received error:\n{error}')
+                        self.send_mail(
+                            subject='API Bot - Failed to upload request!',
+                            body=f'{error}'
+                        )
+                        time.sleep(int(self.config['Adapter']['DB_FETCH_INTERVAL']))
+                    else:
+                        # update page after successfull upload
+                        page.state = db_model.PageState.PROCESSING
+                        page.processing_timestamp = timestamp
+                        self.db_session.commit()
+                
         except KeyboardInterrupt:
             self.logger.info('Stopped request uploading!')
 
