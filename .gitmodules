@@ -1,7 +1,7 @@
 [submodule "pero-worker-libs"]
 	path = pero-worker-libs
-	url = git@github.com:DCGM/pero-worker-libs.git
+	url = https://github.com/DCGM/pero-worker-libs.git
 [submodule "pero-ocr"]
 	path = pero-ocr
-	url = git@github.com:DCGM/pero-ocr.git
+	url = https://github.com/DCGM/pero-ocr.git
 	branch = develop
