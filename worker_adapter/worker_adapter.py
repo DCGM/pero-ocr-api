@@ -105,6 +105,8 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
 
         # config
         self.config = config
+        self.last_mail_time = datetime.datetime(1970, 1, 1)
+        self.mail_interval = datetime.timedelta(seconds = int(self.config['Mail']['MAX_EMAIL_INTERVAL']))
 
         # current session
         self.db_session = None
@@ -115,23 +117,31 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         super(ZkClient, self).__del__()
     
     ### MAIL ###
-    def send_mail(subject, body):
+    def send_mail(self, subject, body):
         """
         Sends mail with given subject and body to addresses specified in cofiguration.
         :param subject: mail subject
         :param body: mail body
         :nothrow
         """
+        timestamp = datetime.now(datetime.timezone.utc)
+        if timestamp - self.last_mail_time > self.mail_interval:
+            return
+        
+        if self.config['Mail']['NOTIFICATION_ADDRESSES']:
+            return
+
+        self.last_mail_time = timestamp
+
         try:
-            if self.config['Mail']['NOTIFICATION_ADDRESSES']:
-                send_mail(
-                        subject=subject,
-                        body=body.replace("\n", "<br>"),
-                        sender=('PERO OCR - API BOT', self.config['Mail']['USERNAME']),
-                        password=self.config['Mail']['PASSWORD'],
-                        recipients=[ address.strip() for address in self.config['Mail']['NOTIFICATION_ADDRESSES'].split(',')],
-                        host=self.config['Mail']['SERVER']
-                    )
+            send_mail(
+                    subject=subject,
+                    body=body.replace("\n", "<br>"),
+                    sender=('PERO OCR - API BOT', self.config['Mail']['USERNAME']),
+                    password=self.config['Mail']['PASSWORD'],
+                    recipients=[ address.strip() for address in self.config['Mail']['NOTIFICATION_ADDRESSES'].split(',')],
+                    host=self.config['Mail']['SERVER']
+                )
         except Exception:
             self.logger.error('Failed to send notification email!')
             self.logger.debug(f'Received error:\n{traceback.format_exc()}')
