@@ -107,6 +107,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         self.config = config
         self.last_mail_time = datetime.datetime(1970, 1, 1)
         self.mail_interval = datetime.timedelta(seconds = int(self.config['Mail']['MAX_EMAIL_INTERVAL']))
+        self.notification_addresses = [ address.strip() for address in self.config['Mail']['NOTIFICATION_ADDRESSES'].split(',') ]
 
         # current session
         self.db_session = None
@@ -124,11 +125,11 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         :param body: mail body
         :nothrow
         """
-        timestamp = datetime.now(datetime.timezone.utc)
+        timestamp = datetime.datetime.now(datetime.timezone.utc)
         if timestamp - self.last_mail_time > self.mail_interval:
             return
         
-        if self.config['Mail']['NOTIFICATION_ADDRESSES']:
+        if not self.notification_addresses:
             return
 
         self.last_mail_time = timestamp
@@ -139,7 +140,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                     body=body.replace("\n", "<br>"),
                     sender=('PERO OCR - API BOT', self.config['Mail']['USERNAME']),
                     password=self.config['Mail']['PASSWORD'],
-                    recipients=[ address.strip() for address in self.config['Mail']['NOTIFICATION_ADDRESSES'].split(',')],
+                    recipients=self.notification_addresses,
                     host=self.config['Mail']['SERVER']
                 )
         except Exception:
