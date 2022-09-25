@@ -350,60 +350,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                 status == db_model.PageState.PROCESSING_FAILED
         engine_version = ', '.join(engine_version)
 
-        if status == db_model.PageState.PROCESSED:  # processing OK
-            if not os.path.exists(output_folder):
-                os.mkdir(output_folder)
-            
-            page_img = None
-            page_xml = None
-            page_logits = None
-
-            # get file references
-            for i, result in enumerate(processing_request.results):
-                ext = os.path.splitext(result.name)[1]
-                datatype = magic.from_buffer(result.content, mime=True)
-                if datatype.split('/')[0] == 'image':  # recognize image
-                    page_img = processing_request.results[i]
-                elif ext =='.xml':
-                    page_xml = processing_request.results[i]
-                elif ext == '.logits':
-                    page_logits = processing_request.results[i]
-
-            page_layout = PageLayout()
-            page_layout.from_pagexml_string(page_xml.content)
-            page_layout.load_logits(page_logits.content)
-            
-            # generate pagexml with version
-            page_xml_final = page_layout.to_pagexml_string(creator=f'PERO OCR: {engine_version}')
-
-            # generate altoxml format
-            alto_xml = page_layout.to_altoxml_string(
-                ocr_processing=create_ocr_processing_element(software_version_str=engine_version),
-                page_uuid=processing_request.page_uuid
-            )
-
-            # calculate score - from xml
-            score = self.get_score(page_layout)
-
-            # save results
-            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                zipf.writestr('{}_page.xml'.format(page_img.name), page_xml_final)
-                zipf.writestr('{}_page.logits'.format(page_img.name), page_logits.content)
-                zipf.writestr('{}_alto.xml'.format(page_img.name), alto_xml)
-            
-            # change state to processed in database, save score, save engine version
-            self.db_change_page_to_processed(
-                page_id=processing_request.page_uuid,
-                score=score,
-                engine_version=engine_version
-            )
-            # remove image from config['UPLOAD_IMAGES_FOLDER']
-            if page_img.name:
-                image_path = os.path.join(self.config['API']['UPLOAD_IMAGES_FOLDER'], processing_request.page_uuid, '{}'.format(page_img.name))
-                if os.path.exists(image_path):
-                    os.unlink(image_path)
-        
-        else:  # processing failed
+        if status != db_model.PageState.PROCESSED:  # processing Failed
             self.db_change_page_to_failed(
                 page_id=processing_request.page_uuid,
                 fail_type=db_model.PageState.PROCESSING_FAILED,
@@ -415,6 +362,93 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                 subject='API Bot - PROCESSING FAILED',
                 body=processing_request.logs[-1].log
             )
+            # acknowledge the message
+            self.mq_channel.basic_ack(delivery_tag=method.delivery_tag)
+            return
+
+        # page processed successfully
+        if not os.path.exists(output_folder):
+            os.mkdir(output_folder)
+        
+        page_img = None
+        page_xml = None
+        page_logits = None
+
+        # get file references
+        for i, result in enumerate(processing_request.results):
+            ext = os.path.splitext(result.name)[1]
+            datatype = magic.from_buffer(result.content, mime=True)
+            if datatype.split('/')[0] == 'image':  # recognize image
+                page_img = processing_request.results[i]
+            elif ext =='.xml':
+                page_xml = processing_request.results[i]
+            elif ext == '.logits':
+                page_logits = processing_request.results[i]
+
+        error_msg = 'API ERROR:'
+        loading_error = False
+
+        # load pages
+        page_layout = PageLayout()
+        try:
+            page_layout.from_pagexml_string(page_xml.content)
+        except AttributeError:
+            error_msg = f'{error_msg}\nFailed to load pagexml data!'
+            loading_error = True
+        
+        try:
+            page_layout.load_logits(page_logits.content)
+        except AttributeError:
+            error_msg = f'{error_msg}\nFailed to load logits data!'
+            loading_error = True
+        
+        if loading_error:            
+            # processing failed - missing output files
+            self.db_change_page_to_failed(
+                page_id=processing_request.page_uuid,
+                fail_type=db_model.PageState.PROCESSING_FAILED,
+                traceback=f'{processing_request.logs[-1].log}\n{error_msg}',  # save log and error message
+                engine_version=engine_version
+            )
+            # send email notification
+            self.send_mail(
+                subject='API Bot - PROCESSING FAILED',
+                body=f'{processing_request.logs[-1].log}\n{error_msg}'
+            )
+
+            # acknowledge the message
+            self.mq_channel.basic_ack(delivery_tag=method.delivery_tag)
+            return
+        
+        # generate pagexml with version
+        page_xml_final = page_layout.to_pagexml_string(creator=f'PERO OCR: {engine_version}')
+
+        # generate altoxml format
+        alto_xml = page_layout.to_altoxml_string(
+            ocr_processing=create_ocr_processing_element(software_version_str=engine_version),
+            page_uuid=processing_request.page_uuid
+        )
+
+        # calculate score - from xml
+        score = self.get_score(page_layout)
+
+        # save results
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            zipf.writestr('{}_page.xml'.format(page_img.name), page_xml_final)
+            zipf.writestr('{}_page.logits'.format(page_img.name), page_logits.content)
+            zipf.writestr('{}_alto.xml'.format(page_img.name), alto_xml)
+        
+        # change state to processed in database, save score, save engine version
+        self.db_change_page_to_processed(
+            page_id=processing_request.page_uuid,
+            score=score,
+            engine_version=engine_version
+        )
+        # remove image from config['UPLOAD_IMAGES_FOLDER']
+        if page_img.name:
+            image_path = os.path.join(self.config['API']['UPLOAD_IMAGES_FOLDER'], processing_request.page_uuid, '{}'.format(page_img.name))
+            if os.path.exists(image_path):
+                os.unlink(image_path)
 
         # acknowledge the message
         self.mq_channel.basic_ack(delivery_tag=method.delivery_tag)
