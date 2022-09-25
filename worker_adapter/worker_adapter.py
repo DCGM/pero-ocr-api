@@ -105,7 +105,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
 
         # config
         self.config = config
-        self.last_mail_time = datetime.datetime(year=1970, monty=1, day=1, tzinfo=datetime.timezone.utc)
+        self.last_mail_time = datetime.datetime(year=1970, month=1, day=1, tzinfo=datetime.timezone.utc)
         self.mail_interval = datetime.timedelta(seconds = int(self.config['Mail']['MAX_EMAIL_INTERVAL']))
         self.notification_addresses = [ address.strip() for address in self.config['Mail']['NOTIFICATION_ADDRESSES'].split(',') ]
 
