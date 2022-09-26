@@ -128,7 +128,7 @@ def old_files_removals():
         db_session = session_factory()
         pages = db_session.query(Page).outerjoin(Request)\
                           .filter(Request.finish_timestamp < timestamp) \
-                          .filter(Page.state.in_[PageState.PROCESSED, PageState.CANCELED]) \
+                          .filter(Page.state.in_([PageState.PROCESSED, PageState.CANCELED])) \
                           .all()
         for page in pages:
             page.state = PageState.EXPIRED
