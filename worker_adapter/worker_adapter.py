@@ -126,7 +126,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         :nothrow
         """
         timestamp = datetime.datetime.now(datetime.timezone.utc)
-        if timestamp - self.last_mail_time > self.mail_interval:
+        if timestamp - self.last_mail_time < self.mail_interval:
             return
         
         if not self.notification_addresses:
