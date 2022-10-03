@@ -139,3 +139,4 @@ processed_requests/
 config.py
 database.db
 processing_client/config.ini
+current_adapter_config.ini

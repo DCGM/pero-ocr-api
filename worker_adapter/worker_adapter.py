@@ -351,12 +351,17 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         engine_version = ', '.join(engine_version)
 
         if status != db_model.PageState.PROCESSED:  # processing Failed
-            self.db_change_page_to_failed(
-                page_id=processing_request.page_uuid,
-                fail_type=db_model.PageState.PROCESSING_FAILED,
-                traceback=processing_request.logs[-1].log,  # save log
-                engine_version=engine_version
-            )
+            try:
+                self.db_change_page_to_failed(
+                    page_id=processing_request.page_uuid,
+                    fail_type=db_model.PageState.PROCESSING_FAILED,
+                    traceback=processing_request.logs[-1].log,  # save log
+                    engine_version=engine_version
+                )
+            except:
+                channel.basic_nack(delivery_tag = method.delivery_tag, requeue = True)
+                raise
+
             # send email notification
             self.send_mail(
                 subject='API Bot - PROCESSING FAILED',
@@ -404,12 +409,17 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         
         if loading_error:            
             # processing failed - missing output files
-            self.db_change_page_to_failed(
-                page_id=processing_request.page_uuid,
-                fail_type=db_model.PageState.PROCESSING_FAILED,
-                traceback=f'{processing_request.logs[-1].log}\n{error_msg}',  # save log and error message
-                engine_version=engine_version
-            )
+            try:
+                self.db_change_page_to_failed(
+                    page_id=processing_request.page_uuid,
+                    fail_type=db_model.PageState.PROCESSING_FAILED,
+                    traceback=f'{processing_request.logs[-1].log}\n{error_msg}',  # save log and error message
+                    engine_version=engine_version
+                )
+            except:
+                channel.basic_nack(delivery_tag = method.delivery_tag, requeue = True)
+                raise
+
             # send email notification
             self.send_mail(
                 subject='API Bot - PROCESSING FAILED',
@@ -439,11 +449,15 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
             zipf.writestr('{}_alto.xml'.format(page_img.name), alto_xml)
         
         # change state to processed in database, save score, save engine version
-        self.db_change_page_to_processed(
-            page_id=processing_request.page_uuid,
-            score=score,
-            engine_version=engine_version
-        )
+        try:
+            self.db_change_page_to_processed(
+                page_id=processing_request.page_uuid,
+                score=score,
+                engine_version=engine_version
+            )
+        except:
+            channel.basic_nack(delivery_tag = method.delivery_tag, requeue = True)
+            raise
         # remove image from config['UPLOAD_IMAGES_FOLDER']
         if page_img.name:
             image_path = os.path.join(self.config['API']['UPLOAD_IMAGES_FOLDER'], processing_request.page_uuid, '{}'.format(page_img.name))
@@ -471,16 +485,41 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                 self.mq_channel.start_consuming()
             except KeyboardInterrupt:
                 # user exit
-                self.logger.info('Stoped result receiving.')
+                self.logger.info('Result receiving stoped.')
                 break
             except pika.exceptions.AMQPError as e:
                 # connection failed - continue / recover
-                self.logger.error('Result receiving failed!')
+                self.logger.error('Result receiving failed due to MQ connection error!')
                 self.logger.debug('Received error: {}'.format(e))
+                self.send_mail(
+                    'API Bot - Result receiving failed due to MQ connection error!',
+                    f'{e}'
+                )
+            except sqlalchemy.exc.OperationalError as e:
+                # connection to database failed
+                self.logger.error('Result receiving failed due to database connection error!')
+                self.logger.debug('Received error: {}'.format(e))
+                self.send_mail(
+                    'API Bot - Result receiving failed due to database connection error!',
+                    f'{e}'
+                )
+                time.sleep(int(self.config['Adapter']['DB_FETCH_INTERVAL']))
+            except sqlalchemy.exc.PendingRollbackError as e:
+                # transaction initialized before connection failure must be rolled back
+                self.logger.error("Rolling back invalid database transactions!")
+                self.logger.debug('Received error: {}'.format(e))
+                try:
+                    self.db_session.rollback()
+                except sqlalchemy.exc.OperationalError:
+                    self.logger.error('Database connection failed!')
             except Exception as e:
                 # unrecoverable error - exit
                 self.logger.error('Result receiving failed!')
                 self.logger.debug('Received error:\n{}'.format(traceback.format_exc()))
+                self.send_mail(
+                    'API Bot - Result receiving failed due to unknown error!',
+                    f'{traceback.format_exc()}'
+                )
                 raise
 
     def mq_send_request(self, page, engine, output_queue):
@@ -536,8 +575,8 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         Periodically uploades waiting processing requests to MQ.
         :param output_queue: name of output queue where api receiver can pickup complete tasks
         """
-        try:
-            while True:
+        while True:
+            try:
                 self.mq_connect()
 
                 if not self.db_session:
@@ -627,8 +666,26 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                         page.processing_timestamp = timestamp
                         self.db_session.commit()
                 
-        except KeyboardInterrupt:
-            self.logger.info('Stopped request uploading!')
+            except KeyboardInterrupt:
+                self.logger.info('Stopped request uploading!')
+                break
+            except sqlalchemy.exc.OperationalError as e:
+                self.logger.error('Database connection failed!')
+                self.logger.debug(f'Received error: {e}')
+                self.send_mail(
+                    subject='API Bot - Database connection failed!',
+                    body=f'{e}'
+                )
+                time.sleep(int(self.config['Adapter']['DB_FETCH_INTERVAL']))
+            except sqlalchemy.exc.PendingRollbackError as e:
+                # transaction initialized before connection failure must be rolled back
+                self.logger.error("Rolling back invalid database transactions!")
+                self.logger.debug('Received error: {}'.format(e))
+                try:
+                    self.db_session.rollback()
+                except sqlalchemy.exc.OperationalError:
+                    self.logger.error('Database connection failed!')
+
 
     ### MAIN ###
     def run(self, publisher=False):
