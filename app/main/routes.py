@@ -27,7 +27,7 @@ from app.mail.mail import send_mail
 @bp.route('/')
 @bp.route('/index')
 def index():
-    state_stats, _ = get_page_statistics()
+    state_stats = get_page_statistics()
     return render_template('index.html', data=state_stats)
 
 
@@ -406,12 +406,12 @@ def report_failed_processing(page_id):
 @bp.route('/page_statistics', methods=['GET'])
 @require_super_user_api_key
 def page_statistics():
-    state_stats, engine_stats = get_page_statistics()
+    state_stats = get_page_statistics()
 
     return jsonify({
         'status': 'success',
         'state_stats': state_stats,
-        'engine_stats': engine_stats}), 200
+    }), 200
 
 
 @bp.route('/download_image/<string:request_id>/<string:page_name>', methods=['GET'])

@@ -153,17 +153,14 @@ def get_page_statistics(history_hours=24):
     finished_pages = db_session.query(Page).filter(Page.finish_timestamp > from_datetime).all()
     unfinished_pages = db_session.query(Page).filter(Page.finish_timestamp == None).all()
     state_stats = {state.name: 0 for state in PageState if state != PageState.CREATED}
-    engine_stats = {engine.id: 0 for engine in db_session.query(Engine).all()}
-    request_to_engine = {request.id: request.engine_id for request in db_session.query(Request).all()}
 
     for page_db in finished_pages:
         state_stats[page_db.state.name] += 1
     for page_db in unfinished_pages:
         if page_db.state == PageState.WAITING or page_db.state == PageState.PROCESSING:
             state_stats[page_db.state.name] += 1
-        engine_stats[request_to_engine[page_db.request_id]] += 1
 
-    return state_stats, engine_stats
+    return state_stats
 
 
 def change_page_to_processed(page_id, score, engine_version):
