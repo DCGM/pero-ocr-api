@@ -267,15 +267,17 @@ def main():
             logging.info('Terminated by user.')
             sys.exit()
         except:
+            logging.error(f'FAILED. Page: {page_id}, State {error_state}')
             log_and_post_failure(session, config, engine_name, engine_version, page_id, page_url, error_state)
             continue
+        else:
+            lines = 0
+            chars = 0
+            for line in page_layout.lines_iterator():
+                lines += 1
+                chars += len(line.transcription)
+            logging.info(f'DONE Page: {page_id}, lines {lines}, chars {chars}.')
 
-        lines = 0
-        chars = 0
-        for line in page_layout.lines_iterator():
-            lines += 1
-            chars += len(line.transcription)
-        logging.info(f'DONE lines {lines}, chars {chars}.')
         torch.cuda.empty_cache()
 
 
