@@ -40,6 +40,8 @@ def get_args():
     parser.add_argument("--page-pooling-delay", default=2, type=float, help="Delay between queries for processing.")
     parser.add_argument("--min-confidence", default=0.66, type=float,
                         help="Lines with lower confidence will be discarded.")
+    parser.add_argument("--reset-engine-timeout", default=1.0/60, type=float,
+                        help="Time in hours. How often should the model switch between OCR engines. The engine remains the same as long as there are pages waiting to be processed by the current engine.")
 
     args = parser.parse_args()
 
@@ -56,11 +58,62 @@ def timeit(func):
     return timed
 
 
+def try_to_get_local_engine_version(session, config, engine_id):
+    url = join_url(config['SERVER']['base_url'],
+                   'latest_engine_version',
+                   str(engine_id))
+    r = session.get(url)
+    if r.status_code != 200:
+        logging.error(f'Request {url} failed with code {r.status_code}.')
+        return None
+
+    response = r.json()
+    if response['status'] != 'success':
+        logging.error(f'Request {url} returned status {response["status"]}.')
+        return None
+
+    filename = response['filename']
+    if os.path.exists(os.path.join(config["SETTINGS"]['engines_path'], filename[:-4])):
+        return filename
+
+    return None
+
+
+def load_engine(config, filename, engine_name, engine_version):
+    t1 = time.time()
+    engine_config = configparser.ConfigParser()
+    engine_config.read(os.path.join(config["SETTINGS"]['engines_path'], filename[:-4], 'config.ini'))
+    page_parser = PageParser(engine_config,
+                             config_path=os.path.dirname(os.path.join(config["SETTINGS"]['engines_path'],
+                                                                      filename[:-4],
+                                                                      'config.ini')))
+    logging.info(f'Loded engine {engine_name} - {engine_version}. Time: {time.time() - t1}')
+    return page_parser
+
+
 @timeit
 def get_engine(session, config, engine_id):
+    logging.info(f'Starting engine {engine_id}.')
+
+    page_parser = None
+    filename = try_to_get_local_engine_version(session, config, engine_id)
+    if filename:
+        engine_name = filename[:-4].split('#')[0]
+        engine_version = filename[:-4].split('#')[1]
+        logging.warning(f'Loading previously downloaded engine version {filename}. ')
+        try:
+            page_parser = load_engine(config, filename, engine_name, engine_version)
+        except KeyboardInterrupt:
+            raise
+        except:
+            logging.warning(f'Failed to reload  {engine_name} - {engine_version} from {filename}.')
+        else:
+            return page_parser, engine_name, engine_version
+
+    t1 = time.time()
     r = session.get(join_url(config['SERVER']['base_url'],
-                              config['SERVER']['get_download_engine'],
-                              str(engine_id)))
+                             config['SERVER']['get_download_engine'],
+                             str(engine_id)))
 
     d = r.headers['content-disposition']
     filename = re.findall("filename=(.+)", d)[0]
@@ -68,17 +121,16 @@ def get_engine(session, config, engine_id):
     engine_version = filename[:-4].split('#')[1]
     if not os.path.exists(os.path.join(config["SETTINGS"]['engines_path'], filename[:-4])):
         os.mkdir(os.path.join(config["SETTINGS"]['engines_path'], filename[:-4]))
-        with open(os.path.join(config["SETTINGS"]['engines_path'], filename[:-4], filename), 'wb') as f:
-            f.write(r.content)
-        with zipfile.ZipFile(os.path.join(config["SETTINGS"]['engines_path'], filename[:-4], filename), 'r') as f:
-            f.extractall(os.path.join(config["SETTINGS"]['engines_path'], filename[:-4]))
 
-    engine_config = configparser.ConfigParser()
-    engine_config.read(os.path.join(config["SETTINGS"]['engines_path'], filename[:-4], 'config.ini'))
-    page_parser = PageParser(engine_config,
-                             config_path=os.path.dirname(os.path.join(config["SETTINGS"]['engines_path'],
-                                                                      filename[:-4],
-                                                                      'config.ini')))
+    with open(os.path.join(config["SETTINGS"]['engines_path'], filename[:-4], filename), 'wb') as f:
+        f.write(r.content)
+    with zipfile.ZipFile(os.path.join(config["SETTINGS"]['engines_path'], filename[:-4], filename), 'r') as f:
+        f.extractall(os.path.join(config["SETTINGS"]['engines_path'], filename[:-4]))
+
+    logging.info(f'Downloaded engine {engine_name} - {engine_version}. Time: {time.time()-t1}.')
+
+    page_parser = load_engine(config, filename, engine_name, engine_version)
+
     return page_parser, engine_name, engine_version
 
 
@@ -233,11 +285,15 @@ def main():
     engine_name = None
     engine_version = None
     loaded_engine_id = None
+    last_engine_switch_time = time.time()
 
     while True:
         if args.time_limit > 0 and args.time_limit * 3600 < time.time() - start_time:
             logging.info(f'Stopping after reaching time limit. Running time {time.time() - start_time}s.')
             break
+
+        if last_engine_switch_time + args.reset_engine_timeout * 3600 < time.time():
+            config['SETTINGS']['preferred_engine'] = str(0)
 
         page_id, page_url, requested_engine_id = get_request(config, session)
         if not page_id:
@@ -251,9 +307,12 @@ def main():
         logging.info(f'Have page {page_id} {page_url} {requested_engine_id}.')
 
         if loaded_engine_id != requested_engine_id:
+            last_engine_switch_time = time.time()
             page_parser, engine_name, engine_version = get_engine(session, config, requested_engine_id)
             loaded_engine_id = requested_engine_id
-            logging.info(f'Loaded engine {loaded_engine_id} - {engine_name}.')
+            config['SETTINGS']['preferred_engine'] = str(loaded_engine_id)
+            logging.info(f'Loaded engine {loaded_engine_id} - {engine_name}. Time {time.time() - last_engine_switch_time}s')
+
         try:
             error_state = 'INVALID_FILE'
             image = get_image(page_url, config, session)

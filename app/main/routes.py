@@ -302,6 +302,31 @@ def upload_results(page_id):
         'status': 'success'}), 200
 
 
+@bp.route('/latest_engine_version/<int:engine_id>', methods=['GET'])
+@require_super_user_api_key
+def latest_engine_version(engine_id):
+    engine = get_engine(engine_id)
+    if not engine:
+        return jsonify({
+            'status': 'failure',
+            'message': f'Engine {engine_id} has not been found.'}), 404
+    engine_version, models = get_latest_models(engine_id)
+
+    if len(models) == 2:
+        pass
+    elif len(models) == 3:
+        pass
+    else:
+        if not engine:
+            return jsonify({
+                'status': 'failure',
+                'message': 'Too many models for engine.'}), 400
+
+    attachment_filename = f'{engine.name}#{engine_version.version}.zip'
+    return jsonify({
+        'status': 'success', 'filename': attachment_filename}), 200
+
+
 @bp.route('/download_engine/<int:engine_id>', methods=['GET'])
 @require_super_user_api_key
 def download_engine(engine_id):
