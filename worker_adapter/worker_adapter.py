@@ -38,6 +38,9 @@ import traceback
 # Default logger settings (reuirede by kazoo library)
 log_formatter = logging.Formatter('%(asctime)s WORKER_ADAPTER %(levelname)s %(message)s')
 
+# use UTC time in log
+log_formatter.converter = time.gmtime
+
 stderr_handler = logging.StreamHandler()
 stderr_handler.setFormatter(log_formatter)
 
