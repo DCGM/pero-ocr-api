@@ -115,6 +115,9 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         # current session
         self.db_session = None
 
+        # error counter
+        self.error_count = 0
+
     def __del__(self):
         # del ZkClient
         super(WorkerAdapter, self).__del__()
@@ -269,34 +272,6 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
             self.db_session.commit()
     
     ### MQ ###
-    def mq_connect(self, max_retry=0):
-        """
-        Connect to message broker servers.
-        :param max_retry: maximum number of connection attempts before giving up (default - try forever)
-        :raise: ConnectionError if connection to all MQ servers fails
-        """
-        retry_count = 0
-
-        while not (self.mq_connection and self.mq_connection.is_open and self.mq_channel and self.mq_channel.is_open):
-            if retry_count != 0:
-                self.logger.warning(
-                    'Failed to connect to MQ servers, waiting for {n} seconds to retry!'
-                    .format(n=int(self.config['Adapter']['CONNECTION_RETRY_INTERVAL']))
-                )
-                time.sleep(int(self.config['Adapter']['CONNECTION_RETRY_INTERVAL']))
-
-            self.mq_servers = self.get_mq_servers()
-            super().mq_connect()
-
-            retry_count += 1
-            if max_retry and retry_count == max_retry:
-                break
-
-        if not (self.mq_connection and self.mq_connection.is_open and self.mq_channel and self.mq_channel.is_open):
-            raise ConnectionError('Failed to connect to MQ servers!')
-        
-        self.mq_channel.confirm_delivery()
-    
     def get_score(self, page_layout):
         """
         Returns transcription confidence 'score'.
@@ -470,6 +445,9 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         # acknowledge the message
         self.mq_channel.basic_ack(delivery_tag=method.delivery_tag)
 
+        # reset error counter
+        self.error_count = 0
+
     def mq_receive_results(self, queue):
         """
         Receives results from MQ server from given queue.
@@ -477,12 +455,26 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         """
         while True:
             # connection init
-            self.mq_connect()
+            try:
+                self.mq_connect_retry()
+            except ConnectionError:
+                self.logger.error('Failed to connect to MQ servers, trying again!')
+                if self.error_count > 2:
+                    self.send_mail(
+                        'API Bot - MQ server connection failed!',
+                        f'{e}'
+                    )
+                self.error_count += 1
+                continue
+            else:
+                self.mq_channel.confirm_delivery()
+            
             self.mq_channel.basic_consume(
-                    queue,
-                    self._mq_receive_result_callback,
-                    auto_ack=False
-                )
+                queue,
+                self._mq_receive_result_callback,
+                auto_ack=False
+            )
+            
             try:
                 # receive messages
                 self.mq_channel.start_consuming()
@@ -494,18 +486,22 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                 # connection failed - continue / recover
                 self.logger.error('Result receiving failed due to MQ connection error!')
                 self.logger.debug('Received error: {}'.format(e))
-                self.send_mail(
-                    'API Bot - Result receiving failed due to MQ connection error!',
-                    f'{e}'
-                )
+                if self.error_count > 2:
+                    self.send_mail(
+                        'API Bot - Result receiving failed due to MQ connection error!',
+                        f'{e}'
+                    )
+                self.error_count += 1
             except sqlalchemy.exc.OperationalError as e:
                 # connection to database failed
                 self.logger.error('Result receiving failed due to database connection error!')
                 self.logger.debug('Received error: {}'.format(e))
-                self.send_mail(
-                    'API Bot - Result receiving failed due to database connection error!',
-                    f'{e}'
-                )
+                if self.error_count > 2:
+                    self.send_mail(
+                        'API Bot - Result receiving failed due to database connection error!',
+                        f'{e}'
+                    )
+                self.error_count += 1
                 time.sleep(int(self.config['Adapter']['DB_FETCH_INTERVAL']))
             except sqlalchemy.exc.PendingRollbackError as e:
                 # transaction initialized before connection failure must be rolled back
@@ -523,6 +519,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                     'API Bot - Result receiving failed due to unknown error!',
                     f'{traceback.format_exc()}'
                 )
+                self.error_count += 1
                 raise
 
     def mq_send_request(self, page, engine, output_queue):
@@ -580,7 +577,20 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         """
         while True:
             try:
-                self.mq_connect()
+                try:
+                    self.mq_connect_retry()
+                except ConnectionError:
+                    self.logger.error('Failed to connect to MQ servers, trying again!')
+                    if self.error_count > 2:
+                        self.send_mail(
+                            'API Bot - MQ server connection failed!',
+                            f'{e}'
+                        )
+                    self.error_count += 1
+                    continue
+                else:
+                    self.mq_channel.confirm_delivery()
+
 
                 if not self.db_session:
                     self.db_session = self.db_create_session()
@@ -625,11 +635,13 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                     except pika.exceptions.AMQPError as e:
                         self.logger.error('Failed to upload processing request due to MQ connection error!')
                         self.logger.debug('Received error: {}'.format(e))
-                        self.send_mail(
-                            subject='API Bot - Request upload failed!',
-                            body=f'{e}'
-                        )
+                        if self.error_count > 2:
+                            self.send_mail(
+                                subject='API Bot - Request upload failed!',
+                                body=f'{e}'
+                            )
                         time.sleep(int(self.config['Adapter']['DB_FETCH_INTERVAL']))
+                        self.error_count += 1
                         break
                     except OSError as e:
                         self.logger.error(f'Failed to upload page {page.id} to MQ, file not accessible!')
@@ -668,6 +680,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                         page.state = db_model.PageState.PROCESSING
                         page.processing_timestamp = timestamp
                         self.db_session.commit()
+                        self.error_count = 0
                 
             except KeyboardInterrupt:
                 self.logger.info('Stopped request uploading!')
@@ -675,10 +688,12 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
             except sqlalchemy.exc.OperationalError as e:
                 self.logger.error('Database connection failed!')
                 self.logger.debug(f'Received error: {e}')
-                self.send_mail(
-                    subject='API Bot - Database connection failed!',
-                    body=f'{e}'
-                )
+                if self.error_count > 2:
+                    self.send_mail(
+                        subject='API Bot - Database connection failed!',
+                        body=f'{e}'
+                    )
+                self.error_count += 1
                 time.sleep(int(self.config['Adapter']['DB_FETCH_INTERVAL']))
             except sqlalchemy.exc.PendingRollbackError as e:
                 # transaction initialized before connection failure must be rolled back
