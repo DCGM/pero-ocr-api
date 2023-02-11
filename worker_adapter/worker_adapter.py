@@ -569,6 +569,40 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         )
 
         return timestamp
+    
+    def get_max_upload_request_count(self):
+        """
+        Returns number of pages that can be uploaded to MQ.
+        :raise: sqlalchemy.exc.OperationalError if DB operation fails
+        """
+        number_of_pages_in_processing = 0
+
+        pages_in_processing = self.db_session.query(db_model.Page) \
+            .join(db_model.Request) \
+            .join(db_model.ApiKey) \
+            .filter(db_model.ApiKey.suspension == False) \
+            .filter(db_model.Page.state == db_model.PageState.PROCESSING) \
+            .all()
+        number_of_pages_in_processing = len(pages_in_processing)
+
+        # Marks pages that were not processed in time to be uploaded to MQ again.
+        current_time = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        self.logger.debug(f'Current time: {current_time}')
+
+        timeout_pages = 0
+        for page in pages_in_processing:
+            if current_time - page.processing_timestamp \
+                    > datetime.timedelta(seconds=int(self.config['Adapter']['MAX_PROCESSING_TIME'])):
+                page.state = db_model.PageState.WAITING
+                timeout_pages += 1
+                self.logger.debug(f'Marking page {page.id} for reupload.')
+        
+        if timeout_pages:
+            self.logger.debug('Applying chages.')
+            self.db_session.commit()
+            number_of_pages_in_processing -= timeout_pages
+
+        return int(self.config['Adapter']['MAX_REQUEST_COUNT']) - number_of_pages_in_processing
 
     def mq_upload_requests(self, output_queue):
         """
@@ -596,13 +630,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                     self.db_session = self.db_create_session()
                 
                 # get maximum number of requests that can be uploaded
-                # (maximum number of requests - number of requests in processing)
-                upload_request_count = int(self.config['Adapter']['MAX_REQUEST_COUNT']) - len(
-                    self.db_session.query(db_model.Page).join(db_model.Request).join(db_model.ApiKey) \
-                    .filter(db_model.ApiKey.suspension == False) \
-                    .filter(db_model.Page.state == db_model.PageState.PROCESSING) \
-                    .all()
-                )
+                upload_request_count = self.get_max_upload_request_count()
 
                 # fetch new pages from database
                 waiting_pages = self.db_session.query(db_model.Page).join(db_model.Request).join(db_model.ApiKey) \
@@ -681,6 +709,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                         page.processing_timestamp = timestamp
                         self.db_session.commit()
                         self.error_count = 0
+                        self.logger.debug(f'Page {page.id} uploaded successfully!')
                 
             except KeyboardInterrupt:
                 self.logger.info('Stopped request uploading!')
