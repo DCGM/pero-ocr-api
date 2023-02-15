@@ -46,8 +46,6 @@ stderr_handler.setFormatter(log_formatter)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-# TODO - remove debug level
-logger.setLevel(logging.DEBUG)
 logger.addHandler(stderr_handler)
 
 class DBClient:
@@ -777,6 +775,12 @@ def get_args():
         help='Path to adapter config file. (default=./worker_adapter_config.ini)',
         default='./worker_adapter_config.ini'
     )
+    parser.add_argument(
+        '-d', '--debug',
+        help='Enable debug log output.',
+        default=False,
+        action='store_true'
+    )
     return parser.parse_args()
 
 def main():
@@ -784,10 +788,12 @@ def main():
 
     app_config = configparser.ConfigParser()
     app_config.read(args.config)
+    if args.debug:
+        logger.setLevel(logging.DEBUG)
 
     worker_adapter = WorkerAdapter(
         config=app_config,
-        logger=logging.getLogger(__name__)
+        logger=logger
     )
 
     worker_adapter.run(publisher=args.publisher)
