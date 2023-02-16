@@ -32,7 +32,7 @@ brnolm
 scikit-learn
 scikit-image
 tensorflow-gpu
-shapely
+shapely==1.8.0
 pyamg
 imgaug
 arabic_reshaper
