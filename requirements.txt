@@ -31,7 +31,7 @@ torchvision
 brnolm
 scikit-learn
 scikit-image
-tensorflow-gpu
+tensorflow
 shapely==1.8.0
 pyamg
 imgaug
