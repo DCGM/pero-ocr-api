@@ -81,8 +81,9 @@ def get_page_by_id(page_id):
 
 
 def check_save_path(request_id):
-    if not os.path.isdir(os.path.join(app.config['PROCESSED_REQUESTS_FOLDER'], str(request_id))):
-        os.makedirs(os.path.join(app.config['PROCESSED_REQUESTS_FOLDER'], str(request_id)), exist_ok=True)
+    path = os.path.join(app.config['PROCESSED_REQUESTS_FOLDER'], str(request_id))
+    if not os.path.isdir(path):
+        os.makedirs(path, exist_ok=True)
 
 
 def get_page_by_preferred_engine(engine_id):
