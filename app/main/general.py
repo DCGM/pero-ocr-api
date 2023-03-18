@@ -4,6 +4,7 @@ import sqlalchemy
 from sqlalchemy import func
 from collections import defaultdict
 
+
 from app.db.model import Request, Engine, Page, PageState, ApiKey, EngineVersion, Model, EngineVersionModel, \
                          PageState, Notification
 from flask_sqlalchemy_session import current_session as db_session
@@ -86,23 +87,55 @@ def check_save_path(request_id):
         os.makedirs(path, exist_ok=True)
 
 
+def which_keys_have_requests(engine_id = None):
+    api_keys = db_session.query(ApiKey.id).join(Request).join(Page)\
+        .filter(Page.state == PageState.WAITING)\
+        .filter(ApiKey.suspension == False)
+    if engine_id is not None:
+        api_keys = api_keys.filter(Request.engine_id == engine_id)
+    api_keys = api_keys.group_by(ApiKey.id).all()
+    return [x[0] for x in api_keys]
+
+
+def get_processed_page_counts(time_delta: datetime.timedelta = datetime.timedelta(minutes=1)):
+    counts = db_session.query(ApiKey.id, func.count(ApiKey.id))\
+        .join(Request).join(Page)\
+        .filter(Page.state == PageState.PROCESSED)\
+        .filter(Page.finish_timestamp > datetime.datetime.utcnow() - time_delta)\
+        .group_by(ApiKey.id).all()
+    counts = defaultdict(int, counts)
+    return counts
+        
+
 def get_page_by_preferred_engine(engine_id):
     # Get page for preferred engine
     page = None
+    counts = None
     if engine_id is not None:
-        page = db_session.query(Page).join(Request).join(ApiKey)\
-            .filter(Page.state == PageState.WAITING)\
-            .filter(Request.engine_id == engine_id)\
-            .filter(ApiKey.suspension == False) \
-            .order_by(ApiKey.priority.desc(), Page.waiting_timestamp.asc())\
-            .first()
+        api_keys = which_keys_have_requests(engine_id)
+        if len(api_keys) > 0:
+            counts = get_processed_page_counts()
+            lowest_count_key = min(api_keys, key=lambda x: counts[x])
+
+            page = db_session.query(Page).join(Request).join(ApiKey)\
+                .filter(Page.state == PageState.WAITING)\
+                .filter(Request.engine_id == engine_id)\
+                .filter(ApiKey.id == lowest_count_key) \
+                .order_by(Page.waiting_timestamp.asc())\
+                .first()
 
     if not page:
         # Get page for any engine
-        page = db_session.query(Page).join(Request).join(ApiKey).filter(ApiKey.suspension == False)\
-               .filter(Page.state == PageState.WAITING)\
-               .order_by(ApiKey.priority.desc(), Page.waiting_timestamp.asc())\
-               .first()
+        api_keys = which_keys_have_requests()
+        if len(api_keys) > 0:
+            if counts is None:
+                counts = get_processed_page_counts()
+            lowest_count_key = min(api_keys, key=lambda x: counts[x])
+            page = db_session.query(Page).join(Request).join(ApiKey)\
+                .filter(Page.state == PageState.WAITING)\
+                .filter(ApiKey.id == lowest_count_key) \
+                .order_by(Page.waiting_timestamp.asc())\
+                .first()
 
         # get engine for the page
         if page:

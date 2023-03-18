@@ -1,0 +1,15 @@
+drymail==0.0.6
+Flask==1.1.2
+Flask-Mail==0.9.1
+Flask-SQLAlchemy-Session==1.1
+Flask-WTF==0.14.3
+psycopg2==2.8.6
+SQLAlchemy==1.3.16
+zipp==3.1.0
+Jinja2==2.11.2
+MarkupSafe==1.1.1
+itsdangerous==1.1.0
+Werkzeug==1.0.1
+APScheduler==3.6.3
+dateutil
+filelock
