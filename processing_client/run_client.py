@@ -18,8 +18,8 @@ from pathlib import Path
 import torch
 
 from pero_ocr.document_ocr.page_parser import PageParser
-from pero_ocr.document_ocr.layout import PageLayout, create_ocr_processing_element
-from pero_ocr.document_ocr.arabic_helper import ArabicHelper
+from pero_ocr.core.layout import PageLayout, create_ocr_processing_element
+from pero_ocr.core.arabic_helper import ArabicHelper
 
 from helper import join_url
 
