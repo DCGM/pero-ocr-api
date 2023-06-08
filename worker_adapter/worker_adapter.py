@@ -9,7 +9,7 @@ from worker_functions.zk_client import ZkClient
 from worker_functions.mq_client import MQClient
 from message_definitions.message_pb2 import ProcessingRequest, StageLog, Data
 
-from pero_ocr.document_ocr.layout import PageLayout, create_ocr_processing_element
+from pero_ocr.core.layout import PageLayout, create_ocr_processing_element
 
 from app.mail.mail import send_mail
 from app.db import model as db_model
