@@ -49,13 +49,23 @@ logger.setLevel(logging.INFO)
 logger.addHandler(stderr_handler)
 
 class DBClient:
-    def __init__(self, database_url):
+    def __init__(self, database_url, max_request_count, max_processing_time, logger):
         """
         :param database_url: url for database connection
+        :param max_request_count: maximum number of request to process simultaneously
+        :param max_processing_time: maximum time (in seconds) request can spend in processing
+                                    until marked to try again
+        :param logger: logger instance
         """
         self.db_engine = None
         self.new_session = None
         self.database_url = database_url
+        self.max_request_count = max_request_count
+        self.max_processing_time = max_processing_time
+        self.logger = logger
+
+        # current session
+        self.db_session = None
     
     def db_connect(self):
         """
@@ -67,134 +77,24 @@ class DBClient:
     def db_create_session(self):
         """
         Creates new database session.
-        :return: Scoped database session
         """
-        return self.new_session()  # new_session - scoped session instance
+        self.db_session = self.new_session()  # new_session - scoped session instance
     
-
-class WorkerAdapter(ZkClient, MQClient, DBClient):
-    def __init__(self, config, logger = logging.getLogger(__name__)):
+    def rollback(self):
         """
-        Initializes worker adapter.
-        :param config: API config object instance
-        :param logger: logger to use for logging
+        Rollback all pending / uncommited operations on current session.
         """
-        # init ZkClient
-        super(WorkerAdapter, self).__init__(
-            zookeeper_servers=config['Adapter']['ZOOKEEPER_SERVERS'],
-            username=config['Adapter']['USERNAME'],
-            password=config['Adapter']['PASSWORD'],
-            ca_cert=config['Adapter']['CA_CERT'],
-            logger=logger
-        )
-        # init MQClient
-        super(ZkClient, self).__init__(
-            mq_servers=[],
-            username=config['Adapter']['USERNAME'],
-            password=config['Adapter']['PASSWORD'],
-            ca_cert=config['Adapter']['CA_CERT'],
-            logger=logger
-        )
-        # init DBClient
-        super(MQClient, self).__init__(
-            database_url=config['DB']['database_url']
-        )
-
-        # mq servers
-        self.mq_servers_lock = threading.Lock()
-        self.mq_servers = []
-
-        # config
-        self.config = config
-        self.last_mail_time = datetime.datetime(year=1970, month=1, day=1, tzinfo=datetime.timezone.utc)
-        self.mail_interval = datetime.timedelta(seconds = int(self.config['Mail']['MAX_EMAIL_INTERVAL']))
-        self.notification_addresses = [ address.strip() for address in self.config['Mail']['NOTIFICATION_ADDRESSES'].split(',') ]
-
-        # current session
-        self.db_session = None
-
-        # error counter
-        self.error_count = 0
-
-    def __del__(self):
-        # del ZkClient
-        super(WorkerAdapter, self).__del__()
-        super(ZkClient, self).__del__()
+        self.db_session.rollback()
     
-    ### MAIL ###
-    def send_mail(self, subject, body):
-        """
-        Sends mail with given subject and body to addresses specified in cofiguration.
-        :param subject: mail subject
-        :param body: mail body
-        :nothrow
-        """
-        timestamp = datetime.datetime.now(datetime.timezone.utc)
-        if timestamp - self.last_mail_time < self.mail_interval:
-            return
-        
-        if not self.notification_addresses:
-            return
-
-        self.last_mail_time = timestamp
-
-        try:
-            send_mail(
-                    subject=subject,
-                    body=body.replace("\n", "<br>"),
-                    sender=('PERO OCR - API BOT', self.config['Mail']['USERNAME']),
-                    password=self.config['Mail']['PASSWORD'],
-                    recipients=self.notification_addresses,
-                    host=self.config['Mail']['SERVER']
-                )
-        except Exception:
-            self.logger.error('Failed to send notification email!')
-            self.logger.debug(f'Received error:\n{traceback.format_exc()}')
-    
-    ### ZK ###
-    def zk_callback_update_mq_servers(self, servers):
-        """
-        Zookeeper callback for updating MQ server list.
-        :param servers: list of servers
-        """
-        self._set_mq_servers(cf.server_list(servers))
-    
-    def register_update_mq_server_callback(self):
-        """
-        Registers zk_callback_update_mq_servers callback in zookeeper.
-        """
-        self.zk.ChildrenWatch(
-            path=constants.WORKER_CONFIG_MQ_SERVERS,
-            func=self.zk_callback_update_mq_servers
-        )
-    
-    ### STATE ###
-    def _set_mq_servers(self, servers):
-        """
-        Sets server list.
-        :param servers: new list of MQ servers
-        """
-        self.mq_servers_lock.acquire()
-        self.mq_servers = servers
-        self.mq_servers_lock.release()
-
-    def get_mq_servers(self):
-        """
-        Returns current copy of MQ server list
-        :return: MQ server list
-        """
-        self.mq_servers_lock.acquire()
-        mq_servers = copy.deepcopy(self.mq_servers)
-        self.mq_servers_lock.release()
-        return mq_servers
-    
-    ### DB ###
     def db_get_document_status(self, request_id):
         """
         Get status of document.
         :param request_id: id of processing request
         :return: status - percentage how much is processed, quality - quality of the transcription
         """
+        if not self.db_session:
+            self.db_create_session()
+        
         all = self.db_session.query(db_model.Page) \
                 .filter(db_model.Page.request_id == request_id) \
                 .count()
@@ -223,6 +123,34 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         else:
             return False
     
+    def db_change_page_to_not_found(self, page_id, traceback, engine_version):
+        """
+        Change page state to page image was not found.
+        :param page_id: id of the page
+        :param traceback: error traceback
+        :param engine_version: version of the engine request was processed by
+        """
+        self.db_change_page_to_failed(
+            page_id=page_id,
+            fail_type=db_model.PageState.NOT_FOUND,
+            traceback=traceback,
+            engine_version=engine_version
+        )
+
+    def db_change_page_to_processing_failed(self, page_id, traceback, engine_version):
+        """
+        Change page state to processing failed.
+        :param page_id: id of the page
+        :param traceback: error traceback
+        :param engine_version: version of the engine request was processed by
+        """
+        self.db_change_page_to_failed(
+            page_id=page_id,
+            fail_type=db_model.PageState.PROCESSING_FAILED,
+            traceback=traceback,
+            engine_version=engine_version
+        )
+
     def db_change_page_to_failed(self, page_id, fail_type, traceback, engine_version):
         """
         Change page state to failed.
@@ -231,6 +159,9 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         :param traceback: error traceback
         :param engine_version: version of the engine request was processed by
         """
+        if not self.db_session:
+            self.db_create_session()
+        
         page = self.db_session.query(db_model.Page).filter(db_model.Page.id == page_id).first()
         request = self.db_session.query(db_model.Request).filter(db_model.Request.id == page.request_id).first()
 
@@ -254,6 +185,9 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         :param score: transcription quality score
         :param engine_version: version of the engine page was processed by
         """
+        if not self.db_session:
+            self.db_create_session()
+        
         page = self.db_session.query(db_model.Page).filter(db_model.Page.id == page_id).first()
         request = self.db_session.query(db_model.Request).filter(db_model.Request.id == page.request_id).first()
 
@@ -268,6 +202,235 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         if self.db_is_request_processed(request.id):
             request.finish_timestamp = timestamp
             self.db_session.commit()
+    
+    def get_max_upload_request_count(self):
+        """
+        Returns number of pages that can be uploaded to MQ.
+        :raise: sqlalchemy.exc.OperationalError if DB operation fails
+        """
+        if not self.db_session:
+            self.db_create_session()
+        
+        number_of_pages_in_processing = 0
+
+        pages_in_processing = self.db_session.query(db_model.Page) \
+            .join(db_model.Request) \
+            .join(db_model.ApiKey) \
+            .filter(db_model.ApiKey.suspension == False) \
+            .filter(db_model.Page.state == db_model.PageState.PROCESSING) \
+            .all()
+        number_of_pages_in_processing = len(pages_in_processing)
+
+        # Marks pages that were not processed in time to be uploaded to MQ again.
+        current_time = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        self.logger.debug(f'Current time: {current_time}')
+
+        timeout_pages = 0
+        for page in pages_in_processing:
+            if current_time - page.processing_timestamp \
+                    > datetime.timedelta(seconds=self.max_processing_time):
+                page.state = db_model.PageState.WAITING
+                timeout_pages += 1
+                self.logger.debug(f'Marking page {page.id} for reupload.')
+        
+        if timeout_pages:
+            self.logger.debug('Applying chages.')
+            self.db_session.commit()
+            number_of_pages_in_processing -= timeout_pages
+
+        return self.max_request_count - number_of_pages_in_processing
+    
+    def get_waiting_pages(self):
+        """
+        Returns list of waiting pages from db.
+        :return: list of db_model.Page in state waiting
+        """
+        if not self.db_session:
+            self.db_create_session()
+        
+        return db_session \
+                .query(db_model.Page).join(db_model.Request).join(db_model.ApiKey) \
+                .filter(db_model.ApiKey.suspension == False) \
+                .filter(db_model.Page.state == db_model.PageState.WAITING) \
+                .all()
+    
+    def get_request_engine(self, request_id):
+        """
+        Returns engine for given reqest id.
+        :return: instance of db_model.Engine
+        """
+        if not self.db_session:
+            self.db_create_session()
+        
+        return self.db_session.query(db_model.Engine) \
+                              .join(db_model.Request) \
+                              .filter(db_model.Request.id == request_id) \
+                              .first()
+    
+    def set_page_in_processing(self, page_id):
+        """
+        Sets page status to processing.
+        """
+        if not self.db_session:
+            self.db_create_session()
+        
+        page = self.db_session.query(db_model.Page) \
+                              .filter(db_model.Page.id == page_id) \
+                              .first()
+        page.state = db_model.PageState.PROCESSING
+        self.db_session.commit()
+
+
+class ZkAdapterClient(ZkClient):
+    def __init__(self, zookeeper_servers, username, password, ca_cert, logger = logging.getLogger(__name__)):
+        """
+        Initializes zookeeper adapter client.
+        :param zookeeper_servers: list of zookeeper servers to connect to
+        :param username: username for zookeeper authentication
+        :param password: password for zookeeper authentication
+        :param ca_cert: CA certificate for zookeeper SSL verification and connection encrtyption
+        :param logger: logger instance to use
+        """
+        super().__init__(
+            zookeeper_servers=zookeeper_servers,
+            username=username,
+            password=password,
+            ca_cert=ca_cert,
+            logger=logger
+        )
+
+        # mq servers
+        self.mq_servers_lock = threading.Lock()
+        self.mq_servers = []
+    
+    def __del__(self):
+        super().__del__()
+    
+    def zk_callback_update_mq_servers(self, servers):
+        """
+        Zookeeper callback for updating MQ server list.
+        :param servers: list of servers
+        """
+        self._set_mq_servers(cf.server_list(servers))
+    
+    def register_update_mq_server_callback(self):
+        """
+        Registers zk_callback_update_mq_servers callback in zookeeper.
+        """
+        self.zk.ChildrenWatch(
+            path=constants.WORKER_CONFIG_MQ_SERVERS,
+            func=self.zk_callback_update_mq_servers
+        )
+    
+    def _set_mq_servers(self, servers):
+        """
+        Sets server list.
+        :param servers: new list of MQ servers
+        """
+        self.mq_servers_lock.acquire()
+        self.mq_servers = servers
+        self.mq_servers_lock.release()
+
+    def get_mq_servers(self):
+        """
+        Returns current copy of MQ server list
+        :return: MQ server list
+        """
+        self.mq_servers_lock.acquire()
+        mq_servers = copy.deepcopy(self.mq_servers)
+        self.mq_servers_lock.release()
+        return mq_servers
+    
+    def run(self):
+        """
+        Runs the worker adapter zookeeper client.
+        """
+        self.zk_connect()
+        self.register_update_mq_server_callback()
+
+
+class WorkerAdapter(MQClient):
+    def __init__(self, config, logger = logging.getLogger(__name__)):
+        """
+        Initializes worker adapter.
+        :param config: API config object instance
+        :param logger: logger to use for logging
+        """
+        # init MQClient
+        super().__init__(
+            mq_servers=[],
+            username=config['Adapter']['USERNAME'],
+            password=config['Adapter']['PASSWORD'],
+            ca_cert=config['Adapter']['CA_CERT'],
+            logger=logger
+        )
+
+        # init db client
+        self.db_client = DBClient(
+            database_url=config['DB']['database_url'],
+            max_request_count=config['Adapter']['MAX_REQUEST_COUNT'],
+            max_processing_time=config['Adapter']['MAX_PROCESSING_TIME'],
+            logger=logger
+        )
+
+        # init zk client
+        self.zk_client = ZkAdapterClient(
+            zookeeper_servers=config['Adapter']['ZOOKEEPER_SERVERS'],
+            username=config['Adapter']['USERNAME'],
+            password=config['Adapter']['PASSWORD'],
+            ca_cert=config['Adapter']['CA_CERT'],
+            logger=logger
+        )
+
+        # config
+        self.config = config
+        self.last_mail_time = datetime.datetime(year=1970, month=1, day=1, tzinfo=datetime.timezone.utc)
+        self.mail_interval = datetime.timedelta(seconds = int(self.config['Mail']['MAX_EMAIL_INTERVAL']))
+        self.notification_addresses = [ address.strip() for address in self.config['Mail']['NOTIFICATION_ADDRESSES'].split(',') ]
+
+        # error counter
+        self.error_count = 0
+
+    def __del__(self):
+        super().__del__()
+    
+    ### MAIL ###
+    def send_mail(self, subject, body):
+        """
+        Sends mail with given subject and body to addresses specified in cofiguration.
+        :param subject: mail subject
+        :param body: mail body
+        :nothrow
+        """
+        timestamp = datetime.datetime.now(datetime.timezone.utc)
+        if timestamp - self.last_mail_time < self.mail_interval:
+            return
+        
+        if not self.notification_addresses:
+            return
+
+        self.last_mail_time = timestamp
+
+        try:
+            send_mail(
+                subject=subject,
+                body=body.replace("\n", "<br>"),
+                sender=('PERO OCR - API BOT', self.config['Mail']['USERNAME']),
+                password=self.config['Mail']['PASSWORD'],
+                recipients=self.notification_addresses,
+                host=self.config['Mail']['SERVER']
+            )
+        except Exception:
+            self.logger.error('Failed to send notification email!')
+            self.logger.debug(f'Received error:\n{traceback.format_exc()}')
+
+    ### STATE ###
+    def get_mq_servers(self):
+        """
+        Gets current list of MQ servers.
+        :return: MQ server list
+        """
+        return self.zk_client.get_mq_servers()
     
     ### MQ ###
     def get_score(self, page_layout):
@@ -294,10 +457,6 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         :param properties: additional message properties
         :param body: message body (actual processing request/result)
         """
-        # save results to db and disk
-        if not self.db_session:
-            self.db_session = self.db_create_session()
-
         try:
             processing_request = ProcessingRequest().FromString(body)
         except Exception as e:
@@ -318,19 +477,18 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         logits_path = os.path.join(output_folder, processing_request.page_uuid + '.logits.zip')
         
         # get status and engine version
-        status = db_model.PageState.PROCESSED
+        processed = True
         engine_version = []
         for log in processing_request.logs:
             engine_version.append(f'{log.stage}: {log.version}')
             if log.status != 'OK':
-                status == db_model.PageState.PROCESSING_FAILED
+                processed == False
         engine_version = ', '.join(engine_version)
 
-        if status != db_model.PageState.PROCESSED:  # processing Failed
+        if not processed:  # processing Failed
             try:
-                self.db_change_page_to_failed(
+                self.db_client.db_change_page_to_processing_failed(
                     page_id=processing_request.page_uuid,
-                    fail_type=db_model.PageState.PROCESSING_FAILED,
                     traceback=processing_request.logs[-1].log,  # save log
                     engine_version=engine_version
                 )
@@ -386,9 +544,8 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         if loading_error:            
             # processing failed - missing output files
             try:
-                self.db_change_page_to_failed(
+                self.db_client.db_change_page_to_processing_failed(
                     page_id=processing_request.page_uuid,
-                    fail_type=db_model.PageState.PROCESSING_FAILED,
                     traceback=f'{processing_request.logs[-1].log}\n{error_msg}',  # save log and error message
                     engine_version=engine_version
                 )
@@ -426,7 +583,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         
         # change state to processed in database, save score, save engine version
         try:
-            self.db_change_page_to_processed(
+            self.db_client.db_change_page_to_processed(
                 page_id=processing_request.page_uuid,
                 score=score,
                 engine_version=engine_version
@@ -506,7 +663,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                 self.logger.error("Rolling back invalid database transactions!")
                 self.logger.debug('Received error: {}'.format(e))
                 try:
-                    self.db_session.rollback()
+                    self.db_client.rollback()
                 except sqlalchemy.exc.OperationalError:
                     self.logger.error('Database connection failed!')
             except Exception as e:
@@ -567,40 +724,6 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         )
 
         return timestamp
-    
-    def get_max_upload_request_count(self):
-        """
-        Returns number of pages that can be uploaded to MQ.
-        :raise: sqlalchemy.exc.OperationalError if DB operation fails
-        """
-        number_of_pages_in_processing = 0
-
-        pages_in_processing = self.db_session.query(db_model.Page) \
-            .join(db_model.Request) \
-            .join(db_model.ApiKey) \
-            .filter(db_model.ApiKey.suspension == False) \
-            .filter(db_model.Page.state == db_model.PageState.PROCESSING) \
-            .all()
-        number_of_pages_in_processing = len(pages_in_processing)
-
-        # Marks pages that were not processed in time to be uploaded to MQ again.
-        current_time = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
-        self.logger.debug(f'Current time: {current_time}')
-
-        timeout_pages = 0
-        for page in pages_in_processing:
-            if current_time - page.processing_timestamp \
-                    > datetime.timedelta(seconds=int(self.config['Adapter']['MAX_PROCESSING_TIME'])):
-                page.state = db_model.PageState.WAITING
-                timeout_pages += 1
-                self.logger.debug(f'Marking page {page.id} for reupload.')
-        
-        if timeout_pages:
-            self.logger.debug('Applying chages.')
-            self.db_session.commit()
-            number_of_pages_in_processing -= timeout_pages
-
-        return int(self.config['Adapter']['MAX_REQUEST_COUNT']) - number_of_pages_in_processing
 
     def mq_upload_requests(self, output_queue):
         """
@@ -622,19 +745,13 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                     continue
                 else:
                     self.mq_channel.confirm_delivery()
-
-
-                if not self.db_session:
-                    self.db_session = self.db_create_session()
                 
                 # get maximum number of requests that can be uploaded
-                upload_request_count = self.get_max_upload_request_count()
+                upload_request_count = self.db_client.get_max_upload_request_count()
 
                 # fetch new pages from database
-                waiting_pages = self.db_session.query(db_model.Page).join(db_model.Request).join(db_model.ApiKey) \
-                                .filter(db_model.ApiKey.suspension == False) \
-                                .filter(db_model.Page.state == db_model.PageState.WAITING) \
-                                .all()
+                waiting_pages = self.db_client.get_waiting_pages()
+
                 if not waiting_pages or upload_request_count <= 0:
                     # wait for some time if no pages could be uploaded (to prevent agressive fetching from db)
                     time.sleep(int(self.config['Adapter']['DB_FETCH_INTERVAL']))
@@ -643,7 +760,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                 # upload as many requests as possible
                 for page, i in zip(waiting_pages, range(upload_request_count)):
                     # Add engine (pipeline)
-                    engine = self.db_session.query(db_model.Engine).join(db_model.Request).filter(db_model.Request.id == page.request_id).first()
+                    engine = self.db_client.get_request_engine(page.request_id)
 
                     timestamp = None
 
@@ -680,9 +797,8 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                     except ConnectionError as e:
                         self.logger.error(f'Failed to upload page {page.id} to MQ, page not found!')
                         self.logger.debug(f'Received error: {e}')
-                        self.db_change_page_to_failed(
+                        self.db_client.db_change_page_to_not_found(
                             page_id = page.id,
-                            fail_type = db_model.PageState.NOT_FOUND,
                             traceback = f'{e}',
                             engine_version = None
                         )
@@ -703,9 +819,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                         time.sleep(int(self.config['Adapter']['DB_FETCH_INTERVAL']))
                     else:
                         # update page after successfull upload
-                        page.state = db_model.PageState.PROCESSING
-                        page.processing_timestamp = timestamp
-                        self.db_session.commit()
+                        self.db_client.set_page_in_processing(page.id)
                         self.error_count = 0
                         self.logger.debug(f'Page {page.id} uploaded successfully!')
                 
@@ -727,7 +841,7 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
                 self.logger.error("Rolling back invalid database transactions!")
                 self.logger.debug('Received error: {}'.format(e))
                 try:
-                    self.db_session.rollback()
+                    self.db_client.rollback()
                 except sqlalchemy.exc.OperationalError:
                     self.logger.error('Database connection failed!')
 
@@ -740,12 +854,11 @@ class WorkerAdapter(ZkClient, MQClient, DBClient):
         :param queue: Output queue where adapter can pickup processing results
         :return: 0 - success / Raises exception otherwise
         """
-        # get list of MQ servers
-        self.zk_connect()
-        self.register_update_mq_server_callback()
+        # start ZK client to get list of MQ server
+        self.zk_client.run()
 
         # connect DB
-        self.db_connect()
+        self.db_client.db_connect()
 
         # get queue
         queue = self.config['Adapter']['QUEUE']
