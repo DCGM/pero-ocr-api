@@ -19,7 +19,7 @@ from .db import Base, Page, PageState, Request, Notification, ApiKey, Engine
 from app.mail.mail import send_mail
 
 
-engine = create_engine(database_url, convert_unicode=True)
+engine = create_engine(database_url)
 session_factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 

@@ -35,19 +35,6 @@ import configparser
 import argparse
 import traceback
 
-# Default logger settings (reuirede by kazoo library)
-log_formatter = logging.Formatter('%(asctime)s WORKER_ADAPTER %(levelname)s %(message)s')
-
-# use UTC time in log
-log_formatter.converter = time.gmtime
-
-stderr_handler = logging.StreamHandler()
-stderr_handler.setFormatter(log_formatter)
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-logger.addHandler(stderr_handler)
-
 class DBClient:
     def __init__(self, database_url, max_request_count, max_processing_time, logger):
         """
@@ -248,7 +235,7 @@ class DBClient:
         if not self.db_session:
             self.db_create_session()
         
-        return db_session \
+        return self.db_session \
                 .query(db_model.Page).join(db_model.Request).join(db_model.ApiKey) \
                 .filter(db_model.ApiKey.suspension == False) \
                 .filter(db_model.Page.state == db_model.PageState.WAITING) \
@@ -267,7 +254,7 @@ class DBClient:
                               .filter(db_model.Request.id == request_id) \
                               .first()
     
-    def set_page_in_processing(self, page_id):
+    def set_page_in_processing(self, page_id, timestamp):
         """
         Sets page status to processing.
         """
@@ -278,11 +265,12 @@ class DBClient:
                               .filter(db_model.Page.id == page_id) \
                               .first()
         page.state = db_model.PageState.PROCESSING
+        page.processing_timestamp = timestamp
         self.db_session.commit()
 
 
 class ZkAdapterClient(ZkClient):
-    def __init__(self, zookeeper_servers, username, password, ca_cert, logger = logging.getLogger(__name__)):
+    def __init__(self, zookeeper_servers, username, password, ca_cert, logger):
         """
         Initializes zookeeper adapter client.
         :param zookeeper_servers: list of zookeeper servers to connect to
@@ -350,7 +338,7 @@ class ZkAdapterClient(ZkClient):
 
 
 class WorkerAdapter(MQClient):
-    def __init__(self, config, logger = logging.getLogger(__name__)):
+    def __init__(self, config, logger):
         """
         Initializes worker adapter.
         :param config: API config object instance
@@ -368,8 +356,8 @@ class WorkerAdapter(MQClient):
         # init db client
         self.db_client = DBClient(
             database_url=config['DB']['database_url'],
-            max_request_count=config['Adapter']['MAX_REQUEST_COUNT'],
-            max_processing_time=config['Adapter']['MAX_PROCESSING_TIME'],
+            max_request_count=int(config['Adapter']['MAX_REQUEST_COUNT']),
+            max_processing_time=int(config['Adapter']['MAX_PROCESSING_TIME']),
             logger=logger
         )
 
@@ -611,7 +599,7 @@ class WorkerAdapter(MQClient):
         while True:
             # connection init
             try:
-                self.mq_connect_retry()
+                self.mq_connect_retry(confirm_delivery=True)
             except ConnectionError:
                 self.logger.error('Failed to connect to MQ servers, trying again!')
                 if self.error_count > 2:
@@ -621,8 +609,6 @@ class WorkerAdapter(MQClient):
                     )
                 self.error_count += 1
                 continue
-            else:
-                self.mq_channel.confirm_delivery()
             
             self.mq_channel.basic_consume(
                 queue,
@@ -703,9 +689,9 @@ class WorkerAdapter(MQClient):
         
         # create processing request
         request = ProcessingRequest()
-        request.uuid = page.request_id
-        request.page_uuid = page.id
-        request.priority = 0  # TODO - enable 0/1 priority
+        request.uuid = str(page.request_id)  # convert from UUID object to str
+        request.page_uuid = str(page.id)  # convert from UUID object to str
+        request.priority = 0  # priority is deprecated and will be removed in future
         for stage in engine.pipeline.split(','):
             request.processing_stages.append(stage.strip())
         request.processing_stages.append(output_queue)  # add output queue
@@ -733,7 +719,7 @@ class WorkerAdapter(MQClient):
         while True:
             try:
                 try:
-                    self.mq_connect_retry()
+                    self.mq_connect_retry(confirm_delivery=True)
                 except ConnectionError:
                     self.logger.error('Failed to connect to MQ servers, trying again!')
                     if self.error_count > 2:
@@ -743,8 +729,6 @@ class WorkerAdapter(MQClient):
                         )
                     self.error_count += 1
                     continue
-                else:
-                    self.mq_channel.confirm_delivery()
                 
                 # get maximum number of requests that can be uploaded
                 upload_request_count = self.db_client.get_max_upload_request_count()
@@ -819,7 +803,7 @@ class WorkerAdapter(MQClient):
                         time.sleep(int(self.config['Adapter']['DB_FETCH_INTERVAL']))
                     else:
                         # update page after successfull upload
-                        self.db_client.set_page_in_processing(page.id)
+                        self.db_client.set_page_in_processing(page.id, timestamp)
                         self.error_count = 0
                         self.logger.debug(f'Page {page.id} uploaded successfully!')
                 
@@ -899,10 +883,25 @@ def get_args():
 def main():
     args = get_args()
 
-    app_config = configparser.ConfigParser()
-    app_config.read(args.config)
+    # Default logger settings (reuirede by kazoo library)
+    log_formatter = logging.Formatter('%(asctime)s WORKER_ADAPTER %(levelname)s %(message)s')
+
+    # use UTC time in log
+    log_formatter.converter = time.gmtime
+
+    stderr_handler = logging.StreamHandler()
+    stderr_handler.setFormatter(log_formatter)
+
+    logger = logging.getLogger(__name__)
+    print(logger.hasHandlers())
+    logger.setLevel(logging.INFO)
     if args.debug:
         logger.setLevel(logging.DEBUG)
+    logger.addHandler(stderr_handler)
+    logger.propagate = False
+
+    app_config = configparser.ConfigParser()
+    app_config.read(args.config)
 
     worker_adapter = WorkerAdapter(
         config=app_config,
