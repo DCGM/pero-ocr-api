@@ -893,7 +893,6 @@ def main():
     stderr_handler.setFormatter(log_formatter)
 
     logger = logging.getLogger(__name__)
-    print(logger.hasHandlers())
     logger.setLevel(logging.INFO)
     if args.debug:
         logger.setLevel(logging.DEBUG)
