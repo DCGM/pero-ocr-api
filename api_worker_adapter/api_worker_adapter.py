@@ -5,8 +5,9 @@ from worker_adapter.worker_adapter import WorkerAdapterRecoverableError
 from worker_adapter.zk_adapter_client import ZkAdapterClient
 from worker_adapter.mail_client import MailClient
 from worker_adapter.application_adapter import ApplicationAdapter
-from message_definitions.message_pb2 import ProcessingRequest, Data
+from message_definitions.message_pb2 import ProcessingRequest
 from pero_ocr.core.layout import PageLayout, create_ocr_processing_element
+import worker_adapter.adapter_aux_functions as af
 
 from app.db import model as db_model
 import sqlalchemy
@@ -545,39 +546,6 @@ class ApiWorkerAdapter(ApplicationAdapter):
             )
             if os.path.exists(image_path):
                 os.unlink(image_path)
-    
-    @staticmethod
-    def create_processing_request(
-        request_id: str,
-        page_id: str,
-        processing_stages: list[str],
-        files: list[tuple[str, bytes]]
-    ) -> ProcessingRequest:
-        """
-        Generates processing request from processing request data.
-        :param request_id: UUID of request to process as string
-        :param page_id: UUID of page to process as string
-        :param processing_stages: list of processing stages request will go
-            through
-        :param files: list of tuples (file_name, file_content)
-            file name must to be string
-            file content must be bytes
-        :return: ProcessingRequest instance
-        """
-        request = ProcessingRequest()
-        request.uuid = request_id
-        request.page_uuid = page_id
-        request.priority = 0  # deprecated, always 0
-        for stage in processing_stages:
-            request.processing_stages.append(stage.strip())
-        
-        for file in files:
-            f = request.results.add()
-            f.name = file[0]
-            f.content = file[1]
-        
-        return request
-
 
     def get_request(self) -> ProcessingRequest:
         """
@@ -674,7 +642,7 @@ class ApiWorkerAdapter(ApplicationAdapter):
             
             engine = self.db_client.get_request_engine(page.request_id)
 
-            return self.create_processing_request(
+            return af.create_processing_request(
                 request_id=str(page.request_id),
                 page_id=str(page.id),
                 processing_stages=engine.pipeline.split(','),
