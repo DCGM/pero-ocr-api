@@ -321,6 +321,7 @@ class ApiWorkerAdapter(ApplicationAdapter):
         database_url,
         max_request_count,
         max_processing_time,
+        max_error_count,
         db_fetch_interval,
         upload_images_folder,
         processed_requests_folder,
@@ -335,6 +336,8 @@ class ApiWorkerAdapter(ApplicationAdapter):
             simultaneously
         :param max_processing_time: maximum time (in seconds) request can
             spend in processing until marked to be send to processing again
+        :param max_error_count: maximum number of errors until email
+            notification is sent.
         :param upload_images_folder: folder where images waiting for upload
             are stored
         :param processed_requests_folder: folder where to write results
@@ -350,6 +353,9 @@ class ApiWorkerAdapter(ApplicationAdapter):
             max_processing_time=max_processing_time,
             logger=logger
         )
+
+        self.max_error_count = max_error_count
+        self.error_count = 0
 
         self.db_fetch_interval = db_fetch_interval
 
@@ -430,6 +436,19 @@ class ApiWorkerAdapter(ApplicationAdapter):
                     traceback=processing_request.logs[-1].log,  # save log
                     engine_version=engine_version
                 )
+            except sqlalchemy.exc.PendingRollbackError as e:
+                # transaction initialized before connection failure must be
+                # rolled back
+                self.logger.error("Rolling back invalid database transactions!")
+                self.logger.debug('Received error: {}'.format(e))
+                try:
+                    self.db_client.rollback()
+                except sqlalchemy.exc.OperationalError:
+                    self.logger.error('Database connection failed!')
+                raise WorkerAdapterRecoverableError(
+                    'Failed to save processing result of page'
+                    f' {processing_request.page_uuid} to database!'
+                )
             except:
                 raise WorkerAdapterRecoverableError(
                     'Failed to save processing result of page'
@@ -486,6 +505,19 @@ class ApiWorkerAdapter(ApplicationAdapter):
                     traceback=f'{processing_request.logs[-1].log}\n{error_msg}',
                     engine_version=engine_version
                 )
+            except sqlalchemy.exc.PendingRollbackError as e:
+                # transaction initialized before connection failure must be
+                # rolled back
+                self.logger.error("Rolling back invalid database transactions!")
+                self.logger.debug('Received error: {}'.format(e))
+                try:
+                    self.db_client.rollback()
+                except sqlalchemy.exc.OperationalError:
+                    self.logger.error('Database connection failed!')
+                raise WorkerAdapterRecoverableError(
+                    'Failed to save processing result of page'
+                    f' {processing_request.page_uuid} to database!'
+                )
             except:
                 raise WorkerAdapterRecoverableError(
                     'Failed to save processing result of page'
@@ -531,6 +563,19 @@ class ApiWorkerAdapter(ApplicationAdapter):
                 score=score,
                 engine_version=engine_version
             )
+        except sqlalchemy.exc.PendingRollbackError as e:
+            # transaction initialized before connection failure must be
+            # rolled back
+            self.logger.error("Rolling back invalid database transactions!")
+            self.logger.debug('Received error: {}'.format(e))
+            try:
+                self.db_client.rollback()
+            except sqlalchemy.exc.OperationalError:
+                self.logger.error('Database connection failed!')
+            raise WorkerAdapterRecoverableError(
+                'Failed to save processing result of page'
+                f' {processing_request.page_uuid} to database!'
+            )
         except:
             raise WorkerAdapterRecoverableError(
                 'Failed to save processing result of page'
@@ -547,180 +592,182 @@ class ApiWorkerAdapter(ApplicationAdapter):
             if os.path.exists(image_path):
                 os.unlink(image_path)
 
-    def get_request(self) -> ProcessingRequest:
+    def start_uploading_requests(self,
+        output_queue_name: str,
+        upload_request: callable
+    ) -> int:
         """
-        Method called by worker adapter when new processing request can be
-        uploaded to MQ for processing.
-        :return: processing request instance
-        :raise WorkerAdapterRecoverableError when fails but adapter should
-            try to call the method later again
+        Periodically uploads waiting processing requests to MQ.
+        :param output_queue_name: name of the output queue to which processed
+            results should be uploaded to.
+        :param upload_requests: method used to communicate with MQ and send
+            requests to upload. Method takes processing_request and
+            output_queue_name as arguments and returns timestamp when request
+            was uploaded. Can raise BadRequestError when request cannot be send
+            and WorkerAdapterError when sending fails unrecoverably.
+        :return: execution status
         """
-        try:
-            page = None
-            files = []
-            engine = None
-
-            # fetch data from DB
-            if not self.waiting_pages:
-                self.waiting_pages = self.db_client.get_pages_to_upload()
-                self.logger.debug(
-                    f'Number of pages to process: {len(self.waiting_pages)}'
-                )
-                # wait until some pages are available
-                while not self.waiting_pages:
+        return_code = 0
+        while True:
+            try:
+                waiting_pages = self.db_client.get_pages_to_upload()
+                if not waiting_pages:
                     self.logger.debug(
-                        f'Waiting for {self.db_fetch_interval} seconds '
-                        'before fetching more pages!'
+                        f'Waiting for {self.db_fetch_interval} seconds before'
+                        ' fetching more pages!'
                     )
                     time.sleep(self.db_fetch_interval)
-                    self.waiting_pages = self.db_client.get_pages_to_upload()
-                    self.logger.debug(
-                        f'Number of pages to process: {len(self.waiting_pages)}'
-                    )
-            
-            page = self.waiting_pages[0]
-            
-            image_path = os.path.join(
-                self.upload_images_folder,
-                str(page.request_id),
-                page.name
-            )
+                    continue
 
-            # download image
-            if not os.path.exists(image_path):
-                response = requests.get(url=page.url, verify=False, stream=True)
-                if response.status == 200:
-                    with open(image_path, 'wb') as image:
-                        # load image using 2048b chunks
-                        for chunk in response.iter_content(chunk_size=2048):
-                            image.write(chunk)
-                else:  # download failed
-                    self.logger.error(
-                        f'Failed to upload page {page.id} to MQ,'
-                        ' file download failed!'
+                for page in waiting_pages:
+                    engine = self.db_client.get_request_engine(page.request_id)
+                    files = []
+                
+                    image_path = os.path.join(
+                        self.upload_images_folder,
+                        str(page.request_id),
+                        page.name
                     )
-                    self.logger.debug(
-                        f'Received error: {response.error_msg}'
-                    )
-                    self.db_client.db_change_page_to_not_found(
-                        page_id=page.id,
-                        traceback=f'Failed to download page {page.id}!'
-                                f'\n{response.error_msg}',
-                        engine_version=None
-                    )
-                    self.mail_client.send_mail_notification(
-                        subject=f'{self.mail_subject_prefix}'
-                                ' - Failed to upload request, page not found!',
-                        body=f'Failed to download page {page.id}!'
-                            f'\n{response.error_msg}',
-                    )
-                    self.waiting_pages.pop(0)
-                    return
-            
-            try:
-                with open(image_path, 'rb') as image:
-                    files.append((page.name, image.read()))
-            except OSError as e:
-                self.logger.error(
-                    f'Failed to upload page {page.id} to MQ,'
-                    'file not accessible!'
-                )
+
+                    # download image
+                    if not os.path.exists(image_path):
+                        response = requests.get(
+                            url=page.url,
+                            verify=False,
+                            stream=True
+                        )
+                        if response.status == 200:
+                            with open(image_path, 'wb') as image:
+                                # load image using 2048b chunks
+                                for chunk in response.iter_content(
+                                    chunk_size=2048
+                                ):
+                                    image.write(chunk)
+                        else:  # download failed
+                            self.logger.error(
+                                f'Failed to upload page {page.id} to MQ,'
+                                ' file download failed!'
+                            )
+                            self.logger.debug(
+                                f'Received error: {response.error_msg}'
+                            )
+                            self.db_client.db_change_page_to_not_found(
+                                page_id=page.id,
+                                traceback=f'Failed to download page {page.id}!'
+                                        f'\n{response.error_msg}',
+                                engine_version=None
+                            )
+                            self.mail_client.send_mail_notification(
+                                subject=f'{self.mail_subject_prefix}'
+                                        ' - Failed to upload request,'
+                                        ' page not found!',
+                                body=f'Failed to download page {page.id}!'
+                                    f'\n{response.error_msg}',
+                            )
+                            continue
+                
+                    try:
+                        with open(image_path, 'rb') as image:
+                            files.append((page.name, image.read()))
+                    except OSError as e:
+                        self.logger.error(
+                            f'Failed to upload page {page.id} to MQ,'
+                            'file not accessible!'
+                        )
+                        self.logger.debug(f'Received error: {e}')
+                        self.db_client.db_change_page_to_not_found(
+                            page_id=page.id,
+                            traceback=f'Page file not accessible!\n{e}',
+                            engine_version=None
+                        )
+                        self.mail_client.send_mail_notification(
+                            subject=f'{self.mail_subject_prefix}'
+                                    ' - Page file not accessible!',
+                            body=f'Failed to upload page {page.id} to '
+                                f'processing, file is not accessible!\n{e}'
+                        )
+                        self.waiting_pages.pop(0)
+                        continue
+
+                    try:
+                        timestamp = upload_request(
+                            processing_request = af.create_processing_request(
+                                request_id=str(page.request_id),
+                                page_id=str(page.id),
+                                processing_stages=engine.pipeline.split(','),
+                                files=files
+                            ),
+                            output_queue_name = output_queue_name
+                        )
+                    except BadRequestError as e:
+                        # request can't be send - mark it as failed in DB
+                        self.logger.error(
+                            f'Failed to upload page {page.id}'
+                            ' due to wrong input queue in configuration!'
+                        )
+                        self.logger.debug(f'Received error:\n{e}')
+                        self.mail_client.send_mail_notification(
+                            subject=f'{self.mail_subject_prefix}'
+                                    ' - Failed to upload page'
+                                    f' {page.id} due to wrong '
+                                    'input queue in configuration!',
+                            body=f'{e}'
+                        )
+                        self.db_client.db_change_page_to_processing_failed(
+                            page_id=page.id,
+                            traceback=str(e.message),
+                            engine_version=None
+                        )
+                    else:
+                        # mark request as in processing in DB and
+                        # add timestamp when was send
+                        self.db_client.set_page_in_processing(
+                            page_id=page.id,
+                            timestamp=timestamp
+                        )
+                        self.error_count = 0
+            except sqlalchemy.exc.OperationalError as e:
+                self.logger.error('Database connection failed!')
                 self.logger.debug(f'Received error: {e}')
-                self.db_client.db_change_page_to_not_found(
-                    page_id=page.id,
-                    traceback=f'Page file not accessible!\n{e}',
-                    engine_version=None
+                if self.error_count > self.max_error_count:
+                    self.mail_client.send_mail_notification(
+                        subject=f'{self.mail_subject_prefix} - Database'
+                                ' connection failed!',
+                        body=f'{e}'
+                    )
+                self.error_count += 1
+                time.sleep(self.db_fetch_interval)
+            except sqlalchemy.exc.PendingRollbackError as e:
+                # transaction initialized before connection failure must be
+                # rolled back
+                self.logger.error("Rolling back invalid database transactions!")
+                self.logger.debug('Received error: {}'.format(e))
+                try:
+                    self.db_client.rollback()
+                except sqlalchemy.exc.OperationalError:
+                    self.logger.error('Database connection failed!')
+            except KeyboardInterrupt:
+                # prevent keyboard interrupt generating error messages
+                self.logger.info('Request uploading stopped!')
+                break
+            except Exception:
+                error = traceback.format_exc()
+                self.logger.error(
+                    f'Request uploading failed due to unrecoverable error!'
                 )
+                self.logger.error(f'Received error:\n{error}')
                 self.mail_client.send_mail_notification(
-                    subject=f'{self.mail_subject_prefix}'
-                            ' - Page file not accessible!',
-                    body=f'Failed to upload page {page.id} to processing, '
-                        f'file is not accessible!\n{e}'
+                    subject=f'{self.mail_subject_prefix} - Request uploading'
+                            'failed due to unrecoverable error!',
+                    body=f'{error}'
                 )
-                self.waiting_pages.pop(0)
-                return
-            
-            engine = self.db_client.get_request_engine(page.request_id)
-
-            return af.create_processing_request(
-                request_id=str(page.request_id),
-                page_id=str(page.id),
-                processing_stages=engine.pipeline.split(','),
-                files=files
-            )
-        except sqlalchemy.exc.OperationalError as e:
-            self.logger.error('Database connection failed!')
-            self.logger.debug(f'Received error: {e}')
-            raise WorkerAdapterRecoverableError('Database connection failed!')
-        except sqlalchemy.exc.PendingRollbackError as e:
-            # transaction initialized before connection failure must be rolled
-            # back
-            self.logger.error("Rolling back invalid database transactions!")
-            self.logger.debug('Received error: {}'.format(e))
-            try:
-                self.db_client.rollback()
-            except sqlalchemy.exc.OperationalError:
-                pass
-            raise WorkerAdapterRecoverableError('Database connection failed!')
-
-    def confirm_send(self,
-        processing_request: ProcessingRequest,
-        timestamp: datetime.datetime
-    ) -> None:
-        """
-        Method called by worker adapter when processing request is succesfully
-        send to MQ for processing. Method marks page in database as
-        'in processing' and stores timestamp when processing began.
-        :param processing_request: processing request that has been sent
-        :param timestamp: timestamp when the request was sent
-        :nothrow
-        """
-        try:
-            self.db_client.set_page_in_processing(
-                page_id=processing_request.page_uuid,
-                timestamp=timestamp
-            )
-        except Exception:
-            self.logger.error(
-                f'Failed to set page {processing_reqest.page_uuid} state '
-                'to \'PROCESSING\'!'
-            )
-            self.logger.error(f'Received error:\n{traceback.format_exc()}')
-        else:
-            # remove page from waiting pages
-            for page in self.waiting_pages:
-                if str(page.id) == processing_request.page_uuid:
-                    self.waiting_pages.remove(page)
-
-    def report_error(self,
-        processing_request: ProcessingRequest,
-        traceback: str
-    ) -> None:
-        """
-        Method called when request cannot be send to processing because pipeline
-        is wrongly defined and the input queue does not exist. Method marks
-        page processing as failed and stores error message to database.
-        :param processing_request: processing request that could not be send
-        :param traceback: error traceback / error message to store to database
-        :nothrow
-        """
-        try:
-            self.db_client.db_change_page_to_processing_failed(
-                page_id=processing_request.page_uuid,
-                traceback=traceback,
-                engine_version=None
-            )
-        except Exception:
-            self.logger.error(
-                f'Failed to set page {processing_request.page_uuid} state'
-                'to \'PROCESSING_FAILED\'!'
-            )
-            self.logger.error(f'Received error:\n{traceback.format_exc()}')
-        else:
-            # remove page from waiting pages
-            for page in self.waiting_pages:
-                if str(page.id) == processing_request.page_uuid:
-                    self.waiting_pages.remove(page)
+                self.error_count += 1
+                return_code = 1
+                break
+            else:
+                self.error_count = 0
+        
+        return return_code
 
 def get_args():
     """
@@ -802,6 +849,7 @@ def main():
         database_url=app_config['DB']['DATABASE_URL'],
         max_request_count=int(app_config['Adapter']['MAX_REQUEST_COUNT']),
         max_processing_time=int(app_config['Adapter']['MAX_PROCESSING_TIME']),
+        max_error_count=10,
         db_fetch_interval=int(app_config['Adapter']['DB_FETCH_INTERVAL']),
         upload_images_folder=app_config['API']['UPLOAD_IMAGES_FOLDER'],
         processed_requests_folder=
@@ -824,11 +872,9 @@ def main():
     )
 
     if args.publisher:
-        return worker_adapter.start_uploading_requests(
+        return api_worker_adapter.start_uploading_requests(
             output_queue_name = queue_name,
-            get_request = api_worker_adapter.get_request,
-            confirm_send = api_worker_adapter.confirm_send,
-            report_error = api_worker_adapter.report_error
+            upload_request=worker_adapter.upload_request
         )
     else:
         return worker_adapter.start_receiving_results(
