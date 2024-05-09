@@ -200,13 +200,13 @@ def process_image(page_parser, image, page_id, args, engine_name, engine_version
     page_layout = PageLayout(id=page_id, page_size=(image.shape[0], image.shape[1]))
     page_layout = page_parser.process_page(image, page_layout)
 
-    ocr_processing = create_ocr_processing_element(id="IdOcr",
+    ocr_processing_element = create_ocr_processing_element(id="IdOcr",
                                                    software_creator_str="Project PERO",
                                                    software_name_str="{}".format(engine_name),
                                                    software_version_str="{}".format(engine_version),
                                                    processing_datetime=None)
 
-    alto_xml = page_layout.to_altoxml_string(ocr_processing=ocr_processing,
+    alto_xml = page_layout.to_altoxml_string(ocr_processing_element=ocr_processing_element,
                                              min_line_confidence=args.min_confidence)
 
     if args.min_confidence > 0:
