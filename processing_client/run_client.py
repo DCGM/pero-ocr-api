@@ -38,7 +38,7 @@ def get_args():
     parser.add_argument("--exit-on-done", action="store_true", help="Exit when no more data from server.")
     parser.add_argument("--time-limit", default=-1, type=float, help="Exit when runing longer than time-limit hours.")
     parser.add_argument("--page-pooling-delay", default=2, type=float, help="Delay between queries for processing.")
-    parser.add_argument("--min-confidence", default=0.66, type=float,
+    parser.add_argument("--min-confidence", default=0.42, type=float,
                         help="Lines with lower confidence will be discarded.")
     parser.add_argument("--reset-engine-timeout", default=1.0/60, type=float,
                         help="Time in hours. How often should the model switch between OCR engines. The engine remains the same as long as there are pages waiting to be processed by the current engine.")
