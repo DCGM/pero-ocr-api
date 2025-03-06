@@ -56,6 +56,11 @@ def create_app():
     from app.main import bp as main_bp
     app.register_blueprint(main_bp)
 
+    @app.after_request
+    def remove_session(response):
+        db_session.remove()
+        return response
+
     return app
 
 
