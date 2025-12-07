@@ -1,8 +1,10 @@
 import os
 import datetime
 import sqlalchemy
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from collections import defaultdict
+import time
+import logging
 
 
 from app.db.model import Request, Engine, Page, PageState, ApiKey, EngineVersion, Model, EngineVersionModel, \
@@ -181,18 +183,26 @@ def get_usage_statistics(api_string, from_datetime=None, to_datetime=None):
 
     return pages.first()[0]
 
+#logger = logging.getLogger('gunicorn.error')
 
 def get_page_statistics(history_hours=24):
+    t1 = time.time()
     from_datetime = datetime.datetime.utcnow() - datetime.timedelta(hours=history_hours)
+    #logger.info(f'1 {time.time() - t1}')
     finished_pages = db_session.query(Page).filter(Page.finish_timestamp > from_datetime).all()
-    unfinished_pages = db_session.query(Page).filter(Page.finish_timestamp == None).all()
+    #logger.info(f'2 {time.time() - t1}')
+    unfinished_pages = db_session.query(Page).filter(or_(Page.state == PageState.WAITING, Page.state == PageState.PROCESSING)).filter(Page.finish_timestamp == None).all()
+    #logger.info(f'3 {time.time() - t1}')
     state_stats = {state.name: 0 for state in PageState if state != PageState.CREATED}
+    #logger.info(f'4 {time.time() - t1}')
 
     for page_db in finished_pages:
         state_stats[page_db.state.name] += 1
+    #logger.info(f'5 {time.time() - t1}')
     for page_db in unfinished_pages:
-        if page_db.state == PageState.WAITING or page_db.state == PageState.PROCESSING:
-            state_stats[page_db.state.name] += 1
+        # if page_db.state == PageState.WAITING or page_db.state == PageState.PROCESSING:
+        state_stats[page_db.state.name] += 1
+    #logger.info(f'6 {time.time() - t1}')
 
     return state_stats
 

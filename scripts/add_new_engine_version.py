@@ -27,13 +27,13 @@ def get_args():
 
     parser.add_argument("-e", "--engine", default=None,
                         help="Engine ID for existing engine.")
-    parser.add_argument("--engine_name", default=None,
+    parser.add_argument("--engine-name", default=None,
                         help="Required for creating new engine, when -e not declared.")
-    parser.add_argument("--engine_description", default=None,
+    parser.add_argument("--engine-description", default=None,
                         help="Voluntary for creating new engine, when -e not declared.")
-    parser.add_argument("--engine_version_name", default=None,
-                        help="Voluntary for creating new engine_version, otherwise %Y-%m-%d is used as a name.")
-    parser.add_argument("--engine_version_description", default=None,
+    parser.add_argument("--engine-version-name", default=None,
+                        help="Voluntary for creating new engine_version, otherwise current YY-MM-DD is used as a name.")
+    parser.add_argument("--engine-version-description", default=None,
                         help="Voluntary for creating new engine_version.")
     parser.add_argument("-d", "--database", required=True)
     parser.add_argument("-m", "--models", required=True, nargs='+',
@@ -69,7 +69,7 @@ if __name__ == '__main__':
             exit(-1)
 
     # connect DB
-    db_engine = create_engine(f'{args.database}',
+    db_engine = create_engine(args.database,
                            convert_unicode=True,
                            connect_args={})
     db_session = scoped_session(sessionmaker(autocommit=False,
@@ -109,7 +109,9 @@ if __name__ == '__main__':
 
     # connect models to engine version
     db_session.commit()
+    print(engine_version)
     for model in db_models:
+        print(model)
         engine_version_model = EngineVersionModel(engine_version.id, model.id)
         db_session.add(engine_version_model)
 
