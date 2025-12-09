@@ -15,6 +15,7 @@ class GUID(TypeDecorator):
         Converts string to UUID when retrieving from database. """
 
     impl = TypeEngine
+    cache_ok = True
 
     def load_dialect_impl(self, dialect):
         """ When using Postgres database, use the Postgres UUID column type.
