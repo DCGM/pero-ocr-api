@@ -1,0 +1,10 @@
+sqlalchemy
+Flask==1.1.4
+flask_sqlalchemy_session
+apscheduler
+psycopg2
+drymail
+markupsafe==2.0.1
+python-dateutil
+filelock
+gunicorn
