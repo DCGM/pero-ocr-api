@@ -2,7 +2,7 @@ sqlalchemy
 Flask==1.1.4
 flask_sqlalchemy_session
 apscheduler
-psycopg2
+psycopg2-binary
 drymail
 markupsafe==2.0.1
 python-dateutil
