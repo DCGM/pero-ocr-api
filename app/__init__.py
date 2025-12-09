@@ -6,9 +6,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from flask import Flask
-from flask_bootstrap import Bootstrap
-from flask_jsglue import JSGlue
-from flask_dropzone import Dropzone
+#from flask_bootstrap import Bootstrap
+#from flask_jsglue import JSGlue
+#from flask_dropzone import Dropzone
 from flask_sqlalchemy_session import flask_scoped_session
 
 from pathlib import Path
@@ -38,8 +38,8 @@ def create_app():
     Path(app.config['MODELS_FOLDER']).mkdir(parents=True, exist_ok=True)
     Path(app.config['UPLOAD_IMAGES_FOLDER']).mkdir(parents=True, exist_ok=True)
 
-    Bootstrap(app)
-    Dropzone(app)
+    #Bootstrap(app)
+    #Dropzone(app)
 
     notification = db_session.query(Notification).first()
     if notification is not None:
@@ -50,8 +50,8 @@ def create_app():
 
     db_session.commit()
 
-    jsglue = JSGlue()
-    jsglue.init_app(app)
+    #jsglue = JSGlue()
+    #jsglue.init_app(app)
 
     from app.main import bp as main_bp
     app.register_blueprint(main_bp)
@@ -77,7 +77,7 @@ def processing_timeout():
     db_session = session_factory()
     try:
         now = datetime.datetime.now()
-        delta = datetime.timedelta(seconds=60)
+        delta = datetime.timedelta(seconds=180)
         timestamp = now - delta
     
         pages = db_session.query(Page).filter(Page.state == PageState.PROCESSING).filter(Page.processing_timestamp < timestamp).all()
@@ -127,7 +127,7 @@ def processing_timeout():
 def old_files_removals():
     try: 
         now = datetime.datetime.now()
-        delta = datetime.timedelta(days=7)
+        delta = datetime.timedelta(days=5)
         timestamp = now - delta
 
         db_session = session_factory()
