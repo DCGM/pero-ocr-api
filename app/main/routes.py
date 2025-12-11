@@ -122,7 +122,7 @@ def upload_image(request_id, page_name):
         file.save(os.path.join(app.config['UPLOAD_IMAGES_FOLDER'], str(page.request_id), page_name + '.' + extension))
         o = urlparse(request.base_url)
         if app.config['BASE_IMAGE_URL']:
-            path = f'{app.config['BASE_IMAGE_URL']}/download_image/{request_id}/{page_name}.{extension}'
+            path = f'{app.config["BASE_IMAGE_URL"]}/download_image/{request_id}/{page_name}.{extension}'
         else:
             path = f'{o.scheme}://{o.netloc}{app.config["APPLICATION_ROOT"]}/download_image/{request_id}/{page_name}.{extension}'
         change_page_path(request_id, page_name, path)
