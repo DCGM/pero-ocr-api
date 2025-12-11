@@ -121,7 +121,10 @@ def upload_image(request_id, page_name):
         Path(os.path.join(app.config['UPLOAD_IMAGES_FOLDER'], str(page.request_id))).mkdir(parents=True, exist_ok=True)
         file.save(os.path.join(app.config['UPLOAD_IMAGES_FOLDER'], str(page.request_id), page_name + '.' + extension))
         o = urlparse(request.base_url)
-        path = f'{o.scheme}://{o.netloc}{app.config["APPLICATION_ROOT"]}/download_image/{request_id}/{page_name}.{extension}'
+        if app.config['BASE_IMAGE_URL']:
+            path = f'{app.config['BASE_IMAGE_URL']/download_image/{request_id}/{page_name}.{extension}'
+        else:
+            path = f'{o.scheme}://{o.netloc}{app.config["APPLICATION_ROOT"]}/download_image/{request_id}/{page_name}.{extension}'
         change_page_path(request_id, page_name, path)
         return jsonify({
             'status': 'success'})
