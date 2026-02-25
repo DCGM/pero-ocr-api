@@ -33,3 +33,14 @@ class CreateUserRequest(BaseModel):
 class SuspendUserRequest(BaseModel):
     """Body of ``PUT /admin/users/{user_id}/suspension``."""
     suspended: bool
+
+
+class AddCreditsRequest(BaseModel):
+    """Body of ``POST /admin/users/{user_id}/credits``."""
+    amount: float
+    note: Optional[str] = None
+
+
+class SetEngineCostRequest(BaseModel):
+    """Body of ``PUT /admin/engines/{engine_id}/cost``."""
+    cost_per_page: float

@@ -71,6 +71,7 @@ class EngineInfo(BaseModel):
     description: Optional[str] = None
     engine_version: str
     models: List[ModelInfo]
+    cost_per_page: float = 0.0
 
 
 class EngineListResponse(BaseModel):
@@ -85,6 +86,8 @@ class EngineListResponse(BaseModel):
 class UsageStatisticsResponse(BaseModel):
     status: str
     processed_pages: int
+    credit_balance: Optional[float] = None
+    pending_cost: Optional[float] = None
     # Optional date filters echoed back
     from_date: Optional[str] = None
     to_date: Optional[str] = None
@@ -114,6 +117,8 @@ class ApiKeyItem(BaseModel):
     owner: str
     permission: str
     suspension: bool
+    credit_balance: float = 0.0
+    pending_cost: float = 0.0
 
 
 class CreateUserResponse(BaseModel):
@@ -139,6 +144,8 @@ class UserUsageItem(BaseModel):
     owner: str
     api_string: str
     processed_pages: int
+    credit_balance: float = 0.0
+    pending_cost: float = 0.0
 
 
 class AllUsersUsageStatisticsResponse(BaseModel):
@@ -159,3 +166,35 @@ class EngineUsageStatisticsResponse(BaseModel):
     engines: List[EngineUsageItem]
     from_date: Optional[str] = None
     to_date: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Credits
+# ---------------------------------------------------------------------------
+
+class AddCreditsResponse(BaseModel):
+    status: str
+    user_id: int
+    new_balance: float
+    amount: float
+    note: Optional[str] = None
+
+
+class CreditTransactionItem(BaseModel):
+    id: int
+    amount: float
+    timestamp: str
+    admin_owner: Optional[str] = None
+    note: Optional[str] = None
+
+
+class CreditHistoryResponse(BaseModel):
+    status: str
+    user_id: int
+    transactions: List[CreditTransactionItem]
+
+
+class SetEngineCostResponse(BaseModel):
+    status: str
+    engine_id: int
+    cost_per_page: float

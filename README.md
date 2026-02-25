@@ -106,12 +106,14 @@ All models use SQLAlchemy 2.x declarative base with `Mapped[]` style (`db/base.p
 
 | Column       | Type         | Constraints                     | Description                     |
 |--------------|--------------|----------------------------------|---------------------------------|
-| `id`         | `Integer`    | PRIMARY KEY                      | Auto-increment ID               |
-| `api_string` | `String`     | NOT NULL, INDEXED                | The API key string              |
-| `owner`      | `String`     | NOT NULL                         | Description/name of the owner   |
-| `permission` | `Enum(Permission)` | NOT NULL                  | `USER` or `SUPER_USER`          |
-| `suspension` | `Boolean`    | NOT NULL, DEFAULT `False`        | Whether the key is suspended    |
-| `priority`   | `Integer`    | NOT NULL, DEFAULT `1`            | Priority (unused in current route logic, but exists on model) |
+| `id`             | `Integer`    | PRIMARY KEY                      | Auto-increment ID               |
+| `api_string`     | `String`     | NOT NULL, INDEXED                | The API key string              |
+| `owner`          | `String`     | NOT NULL                         | Description/name of the owner   |
+| `permission`     | `Enum(Permission)` | NOT NULL                  | `USER` or `SUPER_USER`          |
+| `suspension`     | `Boolean`    | NOT NULL, DEFAULT `False`        | Whether the key is suspended    |
+| `priority`       | `Integer`    | NOT NULL, DEFAULT `1`            | Priority (unused in current route logic, but exists on model) |
+| `credit_balance` | `Float`      | NOT NULL, DEFAULT `0.0`          | Available processing credits    |
+| `pending_cost`   | `Float`      | NOT NULL, DEFAULT `0.0`          | Sum of costs for pages currently in flight (not yet processed/failed/canceled) |
 
 #### `request`
 
@@ -141,6 +143,7 @@ Represents a single page/image within a request.
 | `waiting_timestamp`    | `DateTime`      | NULLABLE, INDEXED                       | When the page entered WAITING state              |
 | `processing_timestamp` | `DateTime`      | NULLABLE                                | When the page entered PROCESSING state           |
 | `finish_timestamp`     | `DateTime`      | NULLABLE, INDEXED                       | When the page finished (success or failure)      |
+| `cost`                 | `Float`         | NOT NULL, DEFAULT `0.0`                  | Cost snapshot (engine cost at creation time)      |
 | `request_id`           | `GUID`         | FK → `request.id`, NOT NULL, INDEXED    | Parent request                                   |
 | `engine_version`       | `Integer`       | FK → `engine_version.id`, NULLABLE, INDEXED | Engine version used for processing           |
 
@@ -150,9 +153,10 @@ Represents an OCR engine (e.g., a language-specific model set).
 
 | Column        | Type       | Constraints       | Description            |
 |---------------|------------|-------------------|------------------------|
-| `id`          | `Integer`  | PRIMARY KEY        | Auto-increment ID      |
-| `name`        | `String`   | NOT NULL           | Engine name            |
-| `description` | `String`   | NULLABLE           | Engine description     |
+| `id`            | `Integer`  | PRIMARY KEY        | Auto-increment ID      |
+| `name`          | `String`   | NOT NULL           | Engine name            |
+| `description`   | `String`   | NULLABLE           | Engine description     |
+| `cost_per_page` | `Float`    | NOT NULL, DEFAULT `0.0` | Credit cost per page for this engine |
 
 #### `engine_version`
 
@@ -194,14 +198,29 @@ Singleton table for email notification rate limiting.
 | `id`                | `Integer`  | PRIMARY KEY   | Auto-increment ID                        |
 | `last_notification` | `DateTime` | NOT NULL      | Timestamp of last email notification sent |
 
+#### `credit_transaction`
+
+Audit log of credit balance changes.
+
+| Column             | Type       | Constraints                          | Description                          |
+|--------------------|------------|--------------------------------------|--------------------------------------|
+| `id`               | `Integer`  | PRIMARY KEY                           | Auto-increment ID                    |
+| `api_key_id`       | `Integer`  | FK → `api_key.id`, NOT NULL           | The user whose balance was changed   |
+| `amount`           | `Float`    | NOT NULL                              | Amount added (always positive)       |
+| `timestamp`        | `DateTime` | NOT NULL, DEFAULT `utcnow`            | When the transaction occurred        |
+| `admin_api_key_id` | `Integer`  | FK → `api_key.id`, NULLABLE           | Admin who performed the top-up       |
+| `note`             | `String`   | NULLABLE                              | Optional free-text note              |
+
 ### Entity Relationships
 
 ```
 api_key (1) ──< request (1) ──< page (N)
+api_key (1) ──< credit_transaction (N)
 engine  (1) ──< engine_version (1) ──< engine_version_model >── model
 page.engine_version ──> engine_version.id
 request.engine_id ──> engine.id
 request.api_key_id ──> api_key.id
+credit_transaction.admin_api_key_id ──> api_key.id
 ```
 
 ### PageState Enum (Lifecycle)
@@ -269,7 +288,7 @@ These endpoints require a valid API key (either `USER` or `SUPER_USER` permissio
   ```json
   {"status": "success", "request_id": "<uuid>"}
   ```
-- **Errors:** 422 (bad JSON), 404 (engine not found)
+- **Errors:** 422 (bad JSON), 404 (engine not found), 402 (insufficient credits)
 
 #### `GET /usage_statistics` , `GET /usage_statistics/<from_datetime>` , `GET /usage_statistics/<from_datetime>/<to_datetime>`
 - **Description:** Get the count of processed/expired pages for the authenticated user.
@@ -277,7 +296,7 @@ These endpoints require a valid API key (either `USER` or `SUPER_USER` permissio
 - **URL Params:** Optional ISO-format datetime strings for filtering.
 - **Response (200):**
   ```json
-  {"status": "success", "processed_pages": <int>, "from": "<iso>", "to": "<iso>"}
+  {"status": "success", "processed_pages": <int>, "credit_balance": <float>, "pending_cost": <float>, "from": "<iso>", "to": "<iso>"}
   ```
 - **Errors:** 400 (invalid datetime format)
 
@@ -322,6 +341,7 @@ These endpoints require a valid API key (either `USER` or `SUPER_USER` permissio
         "id": <int>,
         "description": "<str>",
         "engine_version": "<version_str>",
+        "cost_per_page": <float>,
         "models": [{"id": <int>, "name": "<str>"}, ...]
       },
       ...
@@ -358,7 +378,7 @@ These endpoints are used by processing workers. They require the `SUPER_USER` pe
 - **Description:** Get the next page to process. Implements fair scheduling across API keys.
 - **Auth:** `api-key` header (SUPER_USER)
 - **Behavior:**
-  1. Finds API keys with waiting pages (excluding suspended keys).
+  1. Finds API keys with waiting pages (excluding suspended keys and keys with zero credit balance).
   2. Picks the key with the fewest recently processed pages (last 1 minute) for fairness.
   3. Tries to find a `WAITING` page for the preferred engine first.
   4. Falls back to any engine if no page for the preferred engine.
@@ -454,7 +474,7 @@ These endpoints provide administrative operations. They require the `SUPER_USER`
   {
     "status": "success",
     "users": [
-      {"id": <int>, "api_string": "<str>", "owner": "<str>", "permission": "USER", "suspension": false},
+      {"id": <int>, "api_string": "<str>", "owner": "<str>", "permission": "USER", "suspension": false, "credit_balance": <float>, "pending_cost": <float>},
       ...
     ]
   }
@@ -482,7 +502,7 @@ These endpoints provide administrative operations. They require the `SUPER_USER`
   {
     "status": "success",
     "users": [
-      {"api_key_id": <int>, "owner": "<str>", "api_string": "<str>", "processed_pages": <int>},
+      {"api_key_id": <int>, "owner": "<str>", "api_string": "<str>", "processed_pages": <int>, "credit_balance": <float>, "pending_cost": <float>},
       ...
     ],
     "from_date": "<iso_or_null>",
@@ -508,6 +528,49 @@ These endpoints provide administrative operations. They require the `SUPER_USER`
   }
   ```
 - **Errors:** 400 (invalid datetime format)
+
+#### `POST /admin/users/<user_id>/credits`
+- **Description:** Add processing credits to a user's balance.
+- **Auth:** `api-key` header (SUPER_USER)
+- **Request Body (JSON):**
+  ```json
+  {"amount": <float>, "note": "<optional string>"}
+  ```
+  - `amount` must be positive.
+- **Response (200):**
+  ```json
+  {"status": "success", "amount": <float>, "new_balance": <float>, "note": "<str_or_null>"}
+  ```
+- **Errors:** 422 (amount <= 0), 404 (user not found)
+
+#### `GET /admin/users/<user_id>/credits`
+- **Description:** Get the credit transaction history for a user.
+- **Auth:** `api-key` header (SUPER_USER)
+- **Response (200):**
+  ```json
+  {
+    "status": "success",
+    "transactions": [
+      {"id": <int>, "amount": <float>, "timestamp": "<iso>", "admin_owner": "<str_or_null>", "note": "<str_or_null>"},
+      ...
+    ]
+  }
+  ```
+- **Errors:** 404 (user not found)
+
+#### `PUT /admin/engines/<engine_id>/cost`
+- **Description:** Set the credit cost per page for an OCR engine.
+- **Auth:** `api-key` header (SUPER_USER)
+- **Request Body (JSON):**
+  ```json
+  {"cost_per_page": <float>}
+  ```
+  - `cost_per_page` must be >= 0.
+- **Response (200):**
+  ```json
+  {"status": "success", "engine_id": <int>, "cost_per_page": <float>}
+  ```
+- **Errors:** 422 (negative cost), 404 (engine not found)
 
 ---
 

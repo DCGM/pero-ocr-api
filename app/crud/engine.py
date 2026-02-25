@@ -83,5 +83,20 @@ async def get_engine_dict(db: AsyncSession) -> dict:
             "description": engine.description,
             "engine_version": ev.version,
             "models": [{"id": m.id, "name": m.name} for m in models],
+            "cost_per_page": engine.cost_per_page,
         }
     return engines_dict
+
+
+async def set_engine_cost(
+    db: AsyncSession, engine_id: int, cost_per_page: float,
+) -> Engine | None:
+    """Update the cost_per_page for an engine. Returns the engine or None."""
+    result = await db.execute(select(Engine).where(Engine.id == engine_id))
+    engine = result.scalar_one_or_none()
+    if engine is None:
+        return None
+    engine.cost_per_page = cost_per_page
+    await db.commit()
+    await db.refresh(engine)
+    return engine

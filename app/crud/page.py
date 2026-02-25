@@ -66,13 +66,14 @@ async def get_engine_by_page_id(db: AsyncSession, page_id: str) -> Engine | None
 async def _which_keys_have_requests(
     db: AsyncSession, engine_id: int | None = None,
 ) -> list[int]:
-    """Return api_key ids that have WAITING pages (non-suspended users only)."""
+    """Return api_key ids that have WAITING pages (non-suspended users with credits only)."""
     stmt = (
         select(ApiKey.id)
         .join(Request, Request.api_key_id == ApiKey.id)
         .join(Page, Page.request_id == Request.id)
         .where(Page.state == PageState.WAITING)
         .where(ApiKey.suspension == False)  # noqa: E712
+        .where(ApiKey.credit_balance > 0)
     )
     if engine_id is not None:
         stmt = stmt.where(Request.engine_id == engine_id)
@@ -196,7 +197,7 @@ async def change_page_to_processed(
     score: float,
     engine_version_id: int,
 ) -> None:
-    """Mark a page as PROCESSED and update timestamps."""
+    """Mark a page as PROCESSED, update timestamps, and deduct credits."""
     page = await get_page_by_id(db, page_id)
     result = await db.execute(select(Request).where(Request.id == page.request_id))
     req = result.scalar_one()
@@ -207,6 +208,12 @@ async def change_page_to_processed(
     page.engine_version_id = engine_version_id
     page.finish_timestamp = now
     req.modification_timestamp = now
+
+    # Deduct credits: reduce balance and pending
+    from app.crud.credits import deduct_balance, decrement_pending
+    await deduct_balance(db, req.api_key_id, page.cost)
+    await decrement_pending(db, req.api_key_id, page.cost)
+
     await db.commit()
 
     if await _is_request_finished(db, req.id):
@@ -237,6 +244,11 @@ async def change_page_to_failed(
     page.engine_version_id = engine_version_id
     page.finish_timestamp = now
     req.modification_timestamp = now
+
+    # Release pending cost (no balance deduction on failure)
+    from app.crud.credits import decrement_pending
+    await decrement_pending(db, req.api_key_id, page.cost)
+
     await db.commit()
 
     if await _is_request_finished(db, req.id):

@@ -103,6 +103,8 @@ class TestListUsers:
             assert "owner" in u
             assert "permission" in u
             assert "suspension" in u
+            assert "credit_balance" in u
+            assert "pending_cost" in u
 
 
 # ---------------------------------------------------------------------------

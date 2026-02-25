@@ -57,6 +57,8 @@ class ApiKey(Base):
     permission: Mapped[Permission] = mapped_column(Enum(Permission), nullable=False)
     suspension: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    credit_balance: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    pending_cost: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
     requests: Mapped[List["Request"]] = relationship(back_populates="api_key")
 
@@ -93,6 +95,7 @@ class Page(Base):
     url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     state: Mapped[PageState] = mapped_column(Enum(PageState), nullable=False, index=True)
     score: Mapped[Optional[float]] = mapped_column(Float, nullable=True, index=True)
+    cost: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     traceback: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     waiting_timestamp: Mapped[Optional[datetime.datetime]] = mapped_column(
         DateTime, nullable=True, index=True,
@@ -121,6 +124,7 @@ class Engine(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    cost_per_page: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
     versions: Mapped[List["EngineVersion"]] = relationship(back_populates="engine")
 
@@ -158,6 +162,26 @@ class Model(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     config: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class CreditTransaction(Base):
+    __tablename__ = "credit_transaction"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    api_key_id: Mapped[int] = mapped_column(Integer, ForeignKey("api_key.id"), nullable=False)
+    amount: Mapped[float] = mapped_column(Float, nullable=False)
+    timestamp: Mapped[datetime.datetime] = mapped_column(
+        DateTime, nullable=False,
+        default=lambda: datetime.datetime.now(datetime.UTC),
+    )
+    admin_api_key_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("api_key.id"), nullable=True,
+    )
+    note: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    api_key: Mapped["ApiKey"] = relationship(
+        foreign_keys=[api_key_id], viewonly=True,
+    )
 
 
 class Notification(Base):

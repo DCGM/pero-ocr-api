@@ -48,6 +48,8 @@ SUPER_USER_KEY = "test-super-key-456"
 OTHER_USER_KEY = "test-other-user-key-789"
 SUSPENDED_USER_KEY = "test-suspended-key-999"
 SECOND_USER_KEY = "test-second-user-key-222"
+NO_CREDITS_KEY = "test-no-credits-key-000"
+LOW_CREDITS_KEY = "test-low-credits-key-111"
 
 # ---------------------------------------------------------------------------
 # Test infrastructure
@@ -149,7 +151,8 @@ async def user_key(client):
     """Create a USER API key and return the key string."""
     async with _session_maker() as session:
         session.add(
-            ApiKey(api_string=USER_KEY, owner="Test User", permission=Permission.USER)
+            ApiKey(api_string=USER_KEY, owner="Test User", permission=Permission.USER,
+                   credit_balance=10000.0)
         )
         await session.commit()
     return USER_KEY
@@ -164,6 +167,7 @@ async def super_user_key(client):
                 api_string=SUPER_USER_KEY,
                 owner="Test Worker",
                 permission=Permission.SUPER_USER,
+                credit_balance=10000.0,
             )
         )
         await session.commit()
@@ -179,6 +183,7 @@ async def other_user_key(client):
                 api_string=OTHER_USER_KEY,
                 owner="Other User",
                 permission=Permission.USER,
+                credit_balance=10000.0,
             )
         )
         await session.commit()
@@ -197,7 +202,7 @@ async def engine_with_models(client):
     Returns the engine id.
     """
     async with _session_maker() as session:
-        eng = Engine(name="test_engine", description="A test OCR engine")
+        eng = Engine(name="test_engine", description="A test OCR engine", cost_per_page=1.0)
         session.add(eng)
         await session.flush()
 
@@ -260,6 +265,7 @@ async def _create_request_with_pages(user_key_str, engine_id, pages_spec):
                 state=state,
                 request_id=req.id,
                 waiting_timestamp=ts,
+                cost=1.0,
             )
             if state == PageState.PROCESSING:
                 page.processing_timestamp = datetime.datetime.now()
@@ -347,6 +353,7 @@ async def request_with_processed_page(user_key, engine_with_models):
             request_id=req.id,
             score=95.5,
             finish_timestamp=datetime.datetime.utcnow(),
+            cost=1.0,
         )
         session.add(page)
         await session.flush()
@@ -387,6 +394,7 @@ async def request_with_expired_page(user_key, engine_with_models):
             state=PageState.EXPIRED,
             request_id=req.id,
             finish_timestamp=datetime.datetime.utcnow() - datetime.timedelta(days=10),
+            cost=1.0,
         )
         session.add(page)
         await session.flush()
@@ -421,6 +429,7 @@ async def request_with_uploaded_image(user_key, engine_with_models):
             state=PageState.WAITING,
             request_id=req.id,
             waiting_timestamp=datetime.datetime.utcnow(),
+            cost=1.0,
         )
         session.add(page)
         await session.flush()
@@ -453,6 +462,7 @@ async def suspended_user_key(client, engine_with_models):
             owner="Suspended User",
             permission=Permission.USER,
             suspension=True,
+            credit_balance=10000.0,
         )
         session.add(key)
         await session.commit()
@@ -479,6 +489,7 @@ async def second_user_key(client):
                 api_string=SECOND_USER_KEY,
                 owner="Second User",
                 permission=Permission.USER,
+                credit_balance=10000.0,
             )
         )
         await session.commit()
@@ -521,6 +532,7 @@ async def request_with_one_processed_one_waiting(user_key, engine_with_models):
             request_id=req.id,
             score=90.0,
             finish_timestamp=datetime.datetime.utcnow(),
+            cost=1.0,
         )
         session.add(processed_page)
         await session.flush()
@@ -531,6 +543,7 @@ async def request_with_one_processed_one_waiting(user_key, engine_with_models):
             state=PageState.WAITING,
             request_id=req.id,
             waiting_timestamp=datetime.datetime.utcnow(),
+            cost=1.0,
         )
         session.add(waiting_page)
         await session.flush()
@@ -545,3 +558,39 @@ async def request_with_one_processed_one_waiting(user_key, engine_with_models):
             },
             engine_with_models,
         )
+
+
+# ---------------------------------------------------------------------------
+# Credit-specific fixtures
+# ---------------------------------------------------------------------------
+
+@pytest_asyncio.fixture
+async def no_credits_user_key(client):
+    """Create a USER API key with zero credits."""
+    async with _session_maker() as session:
+        session.add(
+            ApiKey(
+                api_string=NO_CREDITS_KEY,
+                owner="Broke User",
+                permission=Permission.USER,
+                credit_balance=0.0,
+            )
+        )
+        await session.commit()
+    return NO_CREDITS_KEY
+
+
+@pytest_asyncio.fixture
+async def low_credits_user_key(client):
+    """Create a USER API key with only 5 credits."""
+    async with _session_maker() as session:
+        session.add(
+            ApiKey(
+                api_string=LOW_CREDITS_KEY,
+                owner="Low Credits User",
+                permission=Permission.USER,
+                credit_balance=5.0,
+            )
+        )
+        await session.commit()
+    return LOW_CREDITS_KEY

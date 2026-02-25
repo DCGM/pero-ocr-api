@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.models import ApiKey, PageState
 from app.config import get_settings, Settings
 from app.dependencies import get_db, get_current_user, guard_request_ownership
-from app.exceptions import NotFoundError, BadRequestError, ValidationError
+from app.exceptions import NotFoundError, BadRequestError, ValidationError, InsufficientCreditsError
 from app.schemas.requests import ProcessingRequestCreate
 from app.schemas.responses import (
     EngineListResponse,
@@ -75,6 +75,7 @@ _validation_error = {422: {"model": ErrorResponse, "description": "Validation er
     ),
     responses={
         **_auth_error,
+        402: {"model": ErrorResponse, "description": "Insufficient credits to cover the cost of the requested pages."},
         404: {"model": ErrorResponse, "description": "The specified engine was not found."},
         422: {"model": ErrorResponse, "description": "Malformed JSON body or invalid request structure."},
     },
@@ -90,6 +91,8 @@ async def post_processing_request(
     """
     try:
         req = await create_request(db, user, body.engine, body.images)
+    except InsufficientCreditsError:
+        raise
     except Exception:
         tb = traceback.format_exc()
         logger.warning("Bad request in post_processing_request: %s", tb)
@@ -158,7 +161,12 @@ async def usage_statistics(
     count = await get_usage_statistics(
         db, user.api_string, from_datetime=parsed_from, to_datetime=parsed_to,
     )
-    result = UsageStatisticsResponse(status="success", processed_pages=count)
+    result = UsageStatisticsResponse(
+        status="success",
+        processed_pages=count,
+        credit_balance=user.credit_balance,
+        pending_cost=user.pending_cost,
+    )
     if parsed_from:
         result.from_date = parsed_from.isoformat()
     if parsed_to:

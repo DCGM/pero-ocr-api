@@ -23,19 +23,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.models import ApiKey, Permission
 from app.dependencies import get_db, get_super_user
 from app.exceptions import BadRequestError, NotFoundError, ValidationError
-from app.schemas.requests import CreateUserRequest, SuspendUserRequest
+from app.schemas.requests import CreateUserRequest, SuspendUserRequest, AddCreditsRequest, SetEngineCostRequest
 from app.schemas.responses import (
+    AddCreditsResponse,
     AllUsersUsageStatisticsResponse,
     ApiKeyItem,
     CreateUserResponse,
+    CreditHistoryResponse,
+    CreditTransactionItem,
     EngineUsageStatisticsResponse,
     ErrorResponse,
+    SetEngineCostResponse,
     SuspendUserResponse,
     UserListResponse,
     UserUsageItem,
     EngineUsageItem,
 )
-from app.crud.api_key import create_api_key, get_all_api_keys, set_suspension
+from app.crud.api_key import create_api_key, get_all_api_keys, get_api_key_by_id, set_suspension
+from app.crud.credits import add_credits, get_credit_history
+from app.crud.engine import get_engine, set_engine_cost
 from app.crud.statistics import get_all_users_usage_statistics, get_engine_usage_statistics
 
 logger = logging.getLogger(__name__)
@@ -118,6 +124,8 @@ async def list_users(
                 owner=k.owner,
                 permission=k.permission.name,
                 suspension=k.suspension,
+                credit_balance=k.credit_balance,
+                pending_cost=k.pending_cost,
             )
             for k in keys
         ],
@@ -223,9 +231,22 @@ async def admin_user_usage_statistics(
         db, from_datetime=parsed_from, to_datetime=parsed_to,
     )
 
+    # Enrich with credit info from ApiKey records
+    all_keys = await get_all_api_keys(db)
+    key_credits = {k.id: (k.credit_balance, k.pending_cost) for k in all_keys}
+
+    users = []
+    for r in rows:
+        balance, pending = key_credits.get(r["api_key_id"], (0.0, 0.0))
+        users.append(UserUsageItem(
+            **r,
+            credit_balance=balance,
+            pending_cost=pending,
+        ))
+
     resp = AllUsersUsageStatisticsResponse(
         status="success",
-        users=[UserUsageItem(**r) for r in rows],
+        users=users,
     )
     if parsed_from:
         resp.from_date = parsed_from.isoformat()
@@ -235,8 +256,139 @@ async def admin_user_usage_statistics(
 
 
 # ---------------------------------------------------------------------------
-# GET /admin/usage_statistics/engines[/<from>[/<to>]]
+# POST /admin/users/{user_id}/credits  —  add credits
 # ---------------------------------------------------------------------------
+
+@router.post(
+    "/users/{user_id}/credits",
+    response_model=AddCreditsResponse,
+    summary="Add credits to a user",
+    description=(
+        "Add processing credits to an API key. The `amount` must be positive. "
+        "An optional `note` can describe the reason for the top-up.\n\n"
+        "Requires a valid `api-key` header with SUPER_USER permission."
+    ),
+    responses={
+        **_admin_auth_error,
+        404: {"model": ErrorResponse, "description": "API key with the given user_id was not found."},
+        422: {"model": ErrorResponse, "description": "Invalid amount (must be positive)."},
+    },
+)
+async def add_user_credits(
+    user_id: int,
+    body: AddCreditsRequest,
+    _caller: ApiKey = Depends(get_super_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Add processing credits to an API key."""
+    if body.amount <= 0:
+        raise ValidationError("Amount must be positive.")
+
+    key = await get_api_key_by_id(db, user_id)
+    if key is None:
+        raise NotFoundError(f"API key with id {user_id} not found.")
+
+    updated = await add_credits(db, user_id, body.amount, _caller.id, body.note)
+    return AddCreditsResponse(
+        status="success",
+        user_id=updated.id,
+        new_balance=updated.credit_balance,
+        amount=body.amount,
+        note=body.note,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /admin/users/{user_id}/credits  —  credit history
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/users/{user_id}/credits",
+    response_model=CreditHistoryResponse,
+    summary="View credit transaction history",
+    description=(
+        "Return the complete credit top-up history for an API key.\n\n"
+        "Requires a valid `api-key` header with SUPER_USER permission."
+    ),
+    responses={
+        **_admin_auth_error,
+        404: {"model": ErrorResponse, "description": "API key with the given user_id was not found."},
+    },
+)
+async def get_user_credit_history(
+    user_id: int,
+    _caller: ApiKey = Depends(get_super_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the credit transaction history for an API key."""
+    key = await get_api_key_by_id(db, user_id)
+    if key is None:
+        raise NotFoundError(f"API key with id {user_id} not found.")
+
+    txs = await get_credit_history(db, user_id)
+
+    # Resolve admin owner names
+    admin_ids = {t.admin_api_key_id for t in txs if t.admin_api_key_id}
+    admin_names = {}
+    for aid in admin_ids:
+        admin_key = await get_api_key_by_id(db, aid)
+        if admin_key:
+            admin_names[aid] = admin_key.owner
+
+    return CreditHistoryResponse(
+        status="success",
+        user_id=user_id,
+        transactions=[
+            CreditTransactionItem(
+                id=t.id,
+                amount=t.amount,
+                timestamp=t.timestamp.isoformat() if t.timestamp else "",
+                admin_owner=admin_names.get(t.admin_api_key_id),
+                note=t.note,
+            )
+            for t in txs
+        ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# PUT /admin/engines/{engine_id}/cost  —  set engine cost per page
+# ---------------------------------------------------------------------------
+
+@router.put(
+    "/engines/{engine_id}/cost",
+    response_model=SetEngineCostResponse,
+    summary="Set engine cost per page",
+    description=(
+        "Set the credit cost per page for an OCR engine. The `cost_per_page` must be "
+        "non-negative.\n\n"
+        "Requires a valid `api-key` header with SUPER_USER permission."
+    ),
+    responses={
+        **_admin_auth_error,
+        404: {"model": ErrorResponse, "description": "Engine with the given engine_id was not found."},
+        422: {"model": ErrorResponse, "description": "Invalid cost (must be non-negative)."},
+    },
+)
+async def update_engine_cost(
+    engine_id: int,
+    body: SetEngineCostRequest,
+    _caller: ApiKey = Depends(get_super_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Set the credit cost per page for an engine."""
+    if body.cost_per_page < 0:
+        raise ValidationError("cost_per_page must be non-negative.")
+
+    engine = await set_engine_cost(db, engine_id, body.cost_per_page)
+    if engine is None:
+        raise NotFoundError(f"Engine with id {engine_id} not found.")
+
+    return SetEngineCostResponse(
+        status="success",
+        engine_id=engine.id,
+        cost_per_page=engine.cost_per_page,
+    )
 
 @router.get(
     "/usage_statistics/engines",

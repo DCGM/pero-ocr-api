@@ -41,6 +41,11 @@ class BadRequestError(ApiError):
         super().__init__(400, message)
 
 
+class InsufficientCreditsError(ApiError):
+    def __init__(self, message: str = "Insufficient credits."):
+        super().__init__(402, message)
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     """Register global exception handlers on the FastAPI application."""
 

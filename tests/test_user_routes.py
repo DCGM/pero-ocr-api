@@ -261,6 +261,7 @@ class TestGetEngines:
         assert eng["id"] == engine_with_models
         assert eng["engine_version"] == "v1.0.0"
         assert len(eng["models"]) == 2
+        assert eng["cost_per_page"] == 1.0
 
 
 # ---------------------------------------------------------------------------
