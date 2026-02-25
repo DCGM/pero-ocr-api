@@ -29,7 +29,7 @@ app/
   crud/                      # async DB operations
   services/                  # file I/O, email helpers
   background/                # asyncio background loops
-  routers/                   # route handlers (public, user, worker)
+  routers/                   # route handlers (public, user, worker, admin)
   templates/                 # Jinja2 HTML templates
 db/
   base.py                    # DeclarativeBase
@@ -38,7 +38,7 @@ db/
 alembic/                     # database migrations
 processing_client/           # OCR worker daemon
 scripts/                     # admin scripts
-tests/                       # async test suite (78 tests)
+tests/                       # async test suite (101 tests)
 ```
 
 ### Quick Start
@@ -232,7 +232,7 @@ CREATED ──> WAITING ──> PROCESSING ──> PROCESSED ──> EXPIRED
 
 ## API Endpoints
 
-All endpoints are registered on FastAPI routers (`app/routers/public.py`, `app/routers/user.py`, `app/routers/worker.py`). Base URL depends on `APPLICATION_ROOT` config.
+All endpoints are registered on FastAPI routers (`app/routers/public.py`, `app/routers/user.py`, `app/routers/worker.py`, `app/routers/admin.py`). Base URL depends on `APPLICATION_ROOT` config.
 
 ### Public Endpoints (No Auth)
 
@@ -425,6 +425,89 @@ These endpoints are used by processing workers. They require the `SUPER_USER` pe
 - **Behavior:** Serves the image file from `UPLOAD_IMAGES_FOLDER`.
 - **Response:** Image file download.
 - **Errors:** 404 (request/page not found, not uploaded, already processed), 405 (already processed)
+
+---
+
+### Admin Endpoints (require `SUPER_USER` API key)
+
+These endpoints provide administrative operations. They require the `SUPER_USER` permission via the `api-key` header.
+
+#### `POST /admin/users`
+- **Description:** Create a new API key.
+- **Auth:** `api-key` header (SUPER_USER)
+- **Request Body (JSON):**
+  ```json
+  {"owner": "<name>", "permission": "USER|SUPER_USER"}
+  ```
+  - `permission` defaults to `"USER"` if omitted.
+- **Response (200):**
+  ```json
+  {"status": "success", "api_key": "<generated_key>", "owner": "<name>", "permission": "USER"}
+  ```
+- **Errors:** 422 (invalid permission)
+
+#### `GET /admin/users`
+- **Description:** List all API keys with metadata.
+- **Auth:** `api-key` header (SUPER_USER)
+- **Response (200):**
+  ```json
+  {
+    "status": "success",
+    "users": [
+      {"id": <int>, "api_string": "<str>", "owner": "<str>", "permission": "USER", "suspension": false},
+      ...
+    ]
+  }
+  ```
+
+#### `PUT /admin/users/<user_id>/suspension`
+- **Description:** Suspend or unsuspend an API key.
+- **Auth:** `api-key` header (SUPER_USER)
+- **Request Body (JSON):**
+  ```json
+  {"suspended": true}
+  ```
+- **Response (200):**
+  ```json
+  {"status": "success", "user_id": <int>, "suspended": true}
+  ```
+- **Errors:** 404 (API key not found)
+
+#### `GET /admin/usage_statistics/users` , `GET /admin/usage_statistics/users/<from>` , `GET /admin/usage_statistics/users/<from>/<to>`
+- **Description:** Get processed page counts for every user, optionally filtered by date range.
+- **Auth:** `api-key` header (SUPER_USER)
+- **URL Params:** Optional ISO-format datetime strings.
+- **Response (200):**
+  ```json
+  {
+    "status": "success",
+    "users": [
+      {"api_key_id": <int>, "owner": "<str>", "api_string": "<str>", "processed_pages": <int>},
+      ...
+    ],
+    "from_date": "<iso_or_null>",
+    "to_date": "<iso_or_null>"
+  }
+  ```
+- **Errors:** 400 (invalid datetime format)
+
+#### `GET /admin/usage_statistics/engines` , `GET /admin/usage_statistics/engines/<from>` , `GET /admin/usage_statistics/engines/<from>/<to>`
+- **Description:** Get processed page counts for each engine, optionally filtered by date range.
+- **Auth:** `api-key` header (SUPER_USER)
+- **URL Params:** Optional ISO-format datetime strings.
+- **Response (200):**
+  ```json
+  {
+    "status": "success",
+    "engines": [
+      {"engine_id": <int>, "engine_name": "<str>", "processed_pages": <int>},
+      ...
+    ],
+    "from_date": "<iso_or_null>",
+    "to_date": "<iso_or_null>"
+  }
+  ```
+- **Errors:** 400 (invalid datetime format)
 
 ---
 

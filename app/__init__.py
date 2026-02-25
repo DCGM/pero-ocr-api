@@ -112,10 +112,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     from app.routers.public import router as public_router, set_templates
     from app.routers.user import router as user_router
     from app.routers.worker import router as worker_router
+    from app.routers.admin import router as admin_router
 
     set_templates(templates)
     app.include_router(public_router)
     app.include_router(user_router)
     app.include_router(worker_router)
+    app.include_router(admin_router)
 
     return app

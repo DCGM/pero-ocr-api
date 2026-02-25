@@ -5,7 +5,7 @@ import datetime
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import ApiKey, Page, PageState, Request
+from db.models import ApiKey, Engine, Page, PageState, Request
 
 
 async def get_page_statistics(
@@ -88,3 +88,101 @@ async def set_notification_timestamp(db: AsyncSession) -> None:
     else:
         notif.last_notification = now
     await db.commit()
+
+
+async def get_all_users_usage_statistics(
+    db: AsyncSession,
+    from_datetime: datetime.datetime | None = None,
+    to_datetime: datetime.datetime | None = None,
+) -> list[dict]:
+    """
+    Count PROCESSED + EXPIRED pages per API key, optionally filtered by date.
+
+    Returns a list of dicts:
+    ``[{"api_key_id": int, "owner": str, "api_string": str, "processed_pages": int}, ...]``
+    """
+    stmt = (
+        select(
+            ApiKey.id.label("api_key_id"),
+            ApiKey.owner,
+            ApiKey.api_string,
+            func.count(Page.id).label("processed_pages"),
+        )
+        .outerjoin(Request, Request.api_key_id == ApiKey.id)
+        .outerjoin(
+            Page,
+            (Page.request_id == Request.id)
+            & Page.state.in_([PageState.PROCESSED, PageState.EXPIRED]),
+        )
+    )
+
+    if from_datetime:
+        stmt = stmt.where(
+            or_(Page.finish_timestamp >= from_datetime, Page.id == None)  # noqa: E711
+        )
+    if to_datetime:
+        stmt = stmt.where(
+            or_(Page.finish_timestamp <= to_datetime, Page.id == None)  # noqa: E711
+        )
+
+    stmt = stmt.group_by(ApiKey.id, ApiKey.owner, ApiKey.api_string).order_by(ApiKey.id)
+
+    result = await db.execute(stmt)
+    rows = result.all()
+    return [
+        {
+            "api_key_id": row.api_key_id,
+            "owner": row.owner,
+            "api_string": row.api_string,
+            "processed_pages": row.processed_pages,
+        }
+        for row in rows
+    ]
+
+
+async def get_engine_usage_statistics(
+    db: AsyncSession,
+    from_datetime: datetime.datetime | None = None,
+    to_datetime: datetime.datetime | None = None,
+) -> list[dict]:
+    """
+    Count PROCESSED + EXPIRED pages per engine, optionally filtered by date.
+
+    Returns a list of dicts:
+    ``[{"engine_id": int, "engine_name": str, "processed_pages": int}, ...]``
+    """
+    stmt = (
+        select(
+            Engine.id.label("engine_id"),
+            Engine.name.label("engine_name"),
+            func.count(Page.id).label("processed_pages"),
+        )
+        .outerjoin(Request, Request.engine_id == Engine.id)
+        .outerjoin(
+            Page,
+            (Page.request_id == Request.id)
+            & Page.state.in_([PageState.PROCESSED, PageState.EXPIRED]),
+        )
+    )
+
+    if from_datetime:
+        stmt = stmt.where(
+            or_(Page.finish_timestamp >= from_datetime, Page.id == None)  # noqa: E711
+        )
+    if to_datetime:
+        stmt = stmt.where(
+            or_(Page.finish_timestamp <= to_datetime, Page.id == None)  # noqa: E711
+        )
+
+    stmt = stmt.group_by(Engine.id, Engine.name).order_by(Engine.id)
+
+    result = await db.execute(stmt)
+    rows = result.all()
+    return [
+        {
+            "engine_id": row.engine_id,
+            "engine_name": row.engine_name,
+            "processed_pages": row.processed_pages,
+        }
+        for row in rows
+    ]

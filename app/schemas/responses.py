@@ -95,3 +95,60 @@ class PageStatisticsResponse(BaseModel):
 class LatestEngineVersionResponse(BaseModel):
     status: str
     filename: str
+
+
+# ---------------------------------------------------------------------------
+# Admin
+# ---------------------------------------------------------------------------
+
+class ApiKeyItem(BaseModel):
+    id: int
+    api_string: str
+    owner: str
+    permission: str
+    suspension: bool
+
+
+class CreateUserResponse(BaseModel):
+    status: str
+    api_key: str
+    owner: str
+    permission: str
+
+
+class UserListResponse(BaseModel):
+    status: str
+    users: List[ApiKeyItem]
+
+
+class SuspendUserResponse(BaseModel):
+    status: str
+    user_id: int
+    suspended: bool
+
+
+class UserUsageItem(BaseModel):
+    api_key_id: int
+    owner: str
+    api_string: str
+    processed_pages: int
+
+
+class AllUsersUsageStatisticsResponse(BaseModel):
+    status: str
+    users: List[UserUsageItem]
+    from_date: Optional[str] = None
+    to_date: Optional[str] = None
+
+
+class EngineUsageItem(BaseModel):
+    engine_id: int
+    engine_name: str
+    processed_pages: int
+
+
+class EngineUsageStatisticsResponse(BaseModel):
+    status: str
+    engines: List[EngineUsageItem]
+    from_date: Optional[str] = None
+    to_date: Optional[str] = None
