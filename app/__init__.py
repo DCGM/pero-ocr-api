@@ -98,7 +98,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="PERO-OCR-API",
-        description="OCR processing API powered by PERO OCR",
+        description=(
+            "OCR processing API powered by PERO OCR.\n\n"
+            "## Authentication\n"
+            "All endpoints (except public ones) require an `api-key` HTTP header. "
+            "User endpoints accept keys with **USER** or **SUPER_USER** permission. "
+            "Admin and worker endpoints require **SUPER_USER** permission.\n\n"
+            "## Error Responses\n"
+            "All errors return a JSON body with `{\"status\": \"failure\", \"message\": \"...\"}` "
+            "and an appropriate HTTP status code:\n"
+            "- **400** — Bad request (invalid parameters or state)\n"
+            "- **401** — Missing / invalid API key or insufficient permissions\n"
+            "- **404** — Resource not found\n"
+            "- **405** — Method not allowed for the current resource state\n"
+            "- **422** — Validation error (malformed input)\n"
+            "- **500** — Internal server error\n"
+        ),
         version="2.0.0",
         lifespan=lifespan,
     )

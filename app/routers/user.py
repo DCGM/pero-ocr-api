@@ -29,6 +29,7 @@ from app.exceptions import NotFoundError, BadRequestError, ValidationError
 from app.schemas.requests import ProcessingRequestCreate
 from app.schemas.responses import (
     EngineListResponse,
+    ErrorResponse,
     RequestCreatedResponse,
     RequestStatusResponse,
     StatusResponse,
@@ -49,6 +50,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["User"])
 
+# Reusable response definitions for OpenAPI documentation
+_auth_error = {401: {"model": ErrorResponse, "description": "Missing or invalid API key, or insufficient permissions."}}
+_not_found = {404: {"model": ErrorResponse, "description": "Requested resource was not found."}}
+_bad_request = {400: {"model": ErrorResponse, "description": "Bad request — invalid parameters."}}
+_validation_error = {422: {"model": ErrorResponse, "description": "Validation error — malformed input."}}
+
 
 # ---------------------------------------------------------------------------
 # POST /post_processing_request
@@ -59,6 +66,18 @@ router = APIRouter(tags=["User"])
     response_model=RequestCreatedResponse,
     tags=["User"],
     summary="Create a new OCR processing request",
+    description=(
+        "Submit a batch of images for OCR processing. Each image entry maps a page name "
+        "to either a URL (the page starts as **WAITING** and is fetched by the worker) or "
+        "`null` (the page starts as **CREATED** and must be uploaded via "
+        "`POST /upload_image`).\n\n"
+        "Requires a valid `api-key` header with USER or SUPER_USER permission."
+    ),
+    responses={
+        **_auth_error,
+        404: {"model": ErrorResponse, "description": "The specified engine was not found."},
+        422: {"model": ErrorResponse, "description": "Malformed JSON body or invalid request structure."},
+    },
 )
 async def post_processing_request(
     body: ProcessingRequestCreate,
@@ -91,6 +110,16 @@ async def post_processing_request(
     response_model=UsageStatisticsResponse,
     tags=["User"],
     summary="Get usage statistics for the authenticated user",
+    description=(
+        "Return the number of pages processed by the authenticated user. "
+        "Optionally filter by date range using ISO 8601 query parameters "
+        "`from_datetime` and `to_datetime`.\n\n"
+        "Requires a valid `api-key` header with USER or SUPER_USER permission."
+    ),
+    responses={
+        **_auth_error,
+        400: {"model": ErrorResponse, "description": "Date parameters are not in valid ISO 8601 format."},
+    },
 )
 @router.get(
     "/usage_statistics/{from_datetime}",
@@ -146,6 +175,19 @@ async def usage_statistics(
     response_model=StatusResponse,
     tags=["User"],
     summary="Upload an image for a page in CREATED state",
+    description=(
+        "Upload an image file for a page that was created with a `null` URL in the "
+        "processing request. The page must be in **CREATED** state. "
+        "Supported image formats are configured server-side (e.g. jpg, png, tif).\n\n"
+        "Requires a valid `api-key` header with USER or SUPER_USER permission. "
+        "The request must belong to the authenticated user."
+    ),
+    responses={
+        **_auth_error,
+        404: {"model": ErrorResponse, "description": "Request or page not found, or request does not belong to the user."},
+        400: {"model": ErrorResponse, "description": "Page is not in CREATED state, or the request body does not contain a file."},
+        422: {"model": ErrorResponse, "description": "Unsupported image format."},
+    },
 )
 async def upload_image(
     request_id: str,
@@ -157,7 +199,7 @@ async def upload_image(
     settings: Settings = Depends(get_settings),
 ):
     """Upload an image file for a page that was created with a null URL."""
-    req = await guard_request_ownership(db, user, request_id)
+    _ = await guard_request_ownership(db, user, request_id)
 
     page, page_state = await get_page_and_state(db, request_id, page_name)
     if not page:
@@ -199,6 +241,15 @@ async def upload_image(
     response_model=RequestStatusResponse,
     tags=["User"],
     summary="Get the processing status of all pages in a request",
+    description=(
+        "Return the current state and quality score for every page in the specified request. "
+        "Possible page states: CREATED, WAITING, PROCESSING, PROCESSED, FAILED, EXPIRED.\n\n"
+        "Requires a valid `api-key` header. The request must belong to the authenticated user."
+    ),
+    responses={
+        **_auth_error,
+        404: {"model": ErrorResponse, "description": "Request not found or does not belong to the authenticated user."},
+    },
 )
 async def request_status(
     request_id: str,
@@ -229,6 +280,12 @@ async def request_status(
     response_model=EngineListResponse,
     tags=["User"],
     summary="List available OCR engines",
+    description=(
+        "Return a dictionary of all available OCR engines. Each entry includes the engine "
+        "description, latest version string, and associated model information.\n\n"
+        "Requires a valid `api-key` header with USER or SUPER_USER permission."
+    ),
+    responses={**_auth_error},
 )
 async def get_engines(
     user: ApiKey = Depends(get_current_user),
@@ -247,6 +304,18 @@ async def get_engines(
     "/download_results/{request_id}/{page_name}/{format}",
     tags=["User"],
     summary="Download OCR results for a page",
+    description=(
+        "Download the OCR results for a single page. The `format` path parameter must be "
+        "one of: `alto` (ALTO XML), `page` (PAGE XML), or `txt` (plain text).\n\n"
+        "The page must be in **PROCESSED** state. Processed results expire after one week.\n\n"
+        "Requires a valid `api-key` header. The request must belong to the authenticated user."
+    ),
+    responses={
+        200: {"content": {"application/octet-stream": {}}, "description": "The result file as a binary download."},
+        **_auth_error,
+        404: {"model": ErrorResponse, "description": "Page not found, results expired, or page not yet processed."},
+        400: {"model": ErrorResponse, "description": "Unsupported export format. Must be `alto`, `page`, or `txt`."},
+    },
 )
 async def download_results(
     request_id: str,
@@ -295,6 +364,15 @@ async def download_results(
     response_model=StatusResponse,
     tags=["User"],
     summary="Cancel a processing request",
+    description=(
+        "Cancel all pages in the request that are in CREATED, WAITING, or PROCESSING state. "
+        "Pages already in PROCESSED, FAILED, or EXPIRED state are not affected.\n\n"
+        "Requires a valid `api-key` header. The request must belong to the authenticated user."
+    ),
+    responses={
+        **_auth_error,
+        404: {"model": ErrorResponse, "description": "Request not found or does not belong to the authenticated user."},
+    },
 )
 async def cancel_request(
     request_id: str,

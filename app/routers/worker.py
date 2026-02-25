@@ -25,6 +25,7 @@ from app.config import get_settings, Settings
 from app.dependencies import get_db, get_super_user
 from app.exceptions import NotFoundError, BadRequestError
 from app.schemas.responses import (
+    ErrorResponse,
     LatestEngineVersionResponse,
     PageStatisticsResponse,
     ProcessingTaskResponse,
@@ -56,6 +57,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Worker"])
 
+# Reusable response definitions for OpenAPI documentation
+_worker_auth_error = {401: {"model": ErrorResponse, "description": "Missing or invalid API key, or the key does not have SUPER_USER permission."}}
+_not_found = {404: {"model": ErrorResponse, "description": "Requested resource was not found."}}
+_bad_request = {400: {"model": ErrorResponse, "description": "Bad request — invalid parameters."}}
+
 
 # ---------------------------------------------------------------------------
 # GET /get_processing_request/<preferred_engine_id>
@@ -65,7 +71,19 @@ router = APIRouter(tags=["Worker"])
     "/get_processing_request/{preferred_engine_id}",
     tags=["Worker"],
     summary="Fetch the next page to process",
-    responses={204: {"description": "No pages available"}},
+    description=(
+        "Fair-scheduling dispatcher that returns the next WAITING page for processing. "
+        "Pages from suspended users are excluded. If a page matching the preferred engine "
+        "is available it is returned first; otherwise the oldest WAITING page for any engine "
+        "is returned.\n\n"
+        "Returns **204 No Content** when no pages are available.\n\n"
+        "Requires a valid `api-key` header with SUPER_USER permission."
+    ),
+    responses={
+        200: {"model": ProcessingTaskResponse, "description": "A page is available for processing."},
+        204: {"description": "No pages are currently available for processing."},
+        **_worker_auth_error,
+    },
 )
 async def get_processing_request(
     preferred_engine_id: int,
@@ -101,6 +119,18 @@ async def get_processing_request(
     response_model=StatusResponse,
     tags=["Worker"],
     summary="Upload OCR results for a page",
+    description=(
+        "Upload ALTO XML, PAGE XML, and plain text results for a processed page. "
+        "The results are stored in a ZIP archive and the page is transitioned to "
+        "**PROCESSED** state. If the page had an uploaded image, it is deleted after "
+        "results are stored.\n\n"
+        "Required headers: `score` (float), `engine-version` (string), `api-key`.\n\n"
+        "Requires SUPER_USER permission."
+    ),
+    responses={
+        **_worker_auth_error,
+        404: {"model": ErrorResponse, "description": "Page with the given page_id does not exist."},
+    },
 )
 async def upload_results(
     page_id: str,
@@ -166,6 +196,16 @@ async def upload_results(
     response_model=LatestEngineVersionResponse,
     tags=["Worker"],
     summary="Get the latest engine version filename",
+    description=(
+        "Return the filename of the latest engine version package for the given engine. "
+        "The filename has the form `engine_name#version.zip`.\n\n"
+        "Requires a valid `api-key` header with SUPER_USER permission."
+    ),
+    responses={
+        **_worker_auth_error,
+        404: {"model": ErrorResponse, "description": "Engine with the given engine_id was not found."},
+        400: {"model": ErrorResponse, "description": "Unexpected number of models attached to the engine."},
+    },
 )
 async def latest_engine_version(
     engine_id: int,
@@ -194,6 +234,18 @@ async def latest_engine_version(
     "/download_engine/{engine_id}",
     tags=["Worker"],
     summary="Download the engine model package",
+    description=(
+        "Package the engine model files into a ZIP archive with a generated `config.ini` "
+        "and return it as a binary download. The ZIP contains all model files needed "
+        "by the processing worker.\n\n"
+        "Requires a valid `api-key` header with SUPER_USER permission."
+    ),
+    responses={
+        200: {"content": {"application/zip": {}}, "description": "The engine model ZIP package."},
+        **_worker_auth_error,
+        404: {"model": ErrorResponse, "description": "Engine with the given engine_id was not found."},
+        400: {"model": ErrorResponse, "description": "Unexpected number of models attached to the engine."},
+    },
 )
 async def download_engine(
     engine_id: int,
@@ -252,6 +304,15 @@ async def download_engine(
     response_model=StatusResponse,
     tags=["Worker"],
     summary="Report a processing failure",
+    description=(
+        "Report that processing of a page failed. The page is transitioned to **FAILED** state. "
+        "Supported failure types: `NOT_FOUND`, `INVALID_FILE`, `PROCESSING_FAILED`.\n\n"
+        "Required headers: `type` (failure type), `engine_version`, `hostname`, `ip-address`.\n\n"
+        "For `PROCESSING_FAILED` failures, an email notification is sent to configured addresses "
+        "(rate-limited).\n\n"
+        "Requires a valid `api-key` header with SUPER_USER permission."
+    ),
+    responses={**_worker_auth_error},
 )
 async def report_failed_processing(
     page_id: str,
@@ -321,6 +382,12 @@ async def report_failed_processing(
     response_model=PageStatisticsResponse,
     tags=["Worker"],
     summary="Get page processing statistics",
+    description=(
+        "Return page counts grouped by state (CREATED, WAITING, PROCESSING, PROCESSED, "
+        "FAILED, EXPIRED) for the last 24 hours.\n\n"
+        "Requires a valid `api-key` header with SUPER_USER permission."
+    ),
+    responses={**_worker_auth_error},
 )
 async def page_statistics(
     user: ApiKey = Depends(get_super_user),
@@ -339,6 +406,18 @@ async def page_statistics(
     "/download_image/{request_id}/{page_name}",
     tags=["Worker"],
     summary="Download an uploaded image",
+    description=(
+        "Download an image that was uploaded by a user. The `page_name` path parameter must "
+        "include the file extension (e.g. `img.jpg`). The image is only available while "
+        "the page is in WAITING or PROCESSING state.\n\n"
+        "Requires a valid `api-key` header with SUPER_USER permission."
+    ),
+    responses={
+        200: {"content": {"image/*": {}}, "description": "The image file."},
+        **_worker_auth_error,
+        404: {"model": ErrorResponse, "description": "Request, page, or image not found (or not uploaded yet)."},
+        405: {"model": ErrorResponse, "description": "Page has already been processed; image was deleted."},
+    },
 )
 async def download_image(
     request_id: str,

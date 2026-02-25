@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
@@ -14,6 +14,13 @@ from pydantic import BaseModel
 
 class StatusResponse(BaseModel):
     status: str
+
+
+class ErrorResponse(BaseModel):
+    """Standard error response returned by all error handlers."""
+
+    status: str = Field(default="failure", examples=["failure"])
+    message: str = Field(..., examples=["Descriptive error message."])
 
 
 # ---------------------------------------------------------------------------

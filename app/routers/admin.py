@@ -29,6 +29,7 @@ from app.schemas.responses import (
     ApiKeyItem,
     CreateUserResponse,
     EngineUsageStatisticsResponse,
+    ErrorResponse,
     SuspendUserResponse,
     UserListResponse,
     UserUsageItem,
@@ -41,6 +42,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
+# Reusable response definitions for OpenAPI documentation
+_admin_auth_error = {401: {"model": ErrorResponse, "description": "Missing or invalid API key, or the key does not have SUPER_USER permission."}}
+_bad_date = {400: {"model": ErrorResponse, "description": "Date parameters are not in valid ISO 8601 format."}}
+
 
 # ---------------------------------------------------------------------------
 # POST /admin/users
@@ -50,6 +55,15 @@ router = APIRouter(prefix="/admin", tags=["Admin"])
     "/users",
     response_model=CreateUserResponse,
     summary="Create a new API key",
+    description=(
+        "Create a new API key with the given owner name and permission level. "
+        "The `permission` field must be `USER` or `SUPER_USER`.\n\n"
+        "Requires a valid `api-key` header with SUPER_USER permission."
+    ),
+    responses={
+        **_admin_auth_error,
+        422: {"model": ErrorResponse, "description": "Invalid permission value. Must be 'USER' or 'SUPER_USER'."},
+    },
 )
 async def create_user(
     body: CreateUserRequest,
@@ -82,6 +96,12 @@ async def create_user(
     "/users",
     response_model=UserListResponse,
     summary="List all API keys",
+    description=(
+        "Return all API keys with their metadata including owner, permission level, "
+        "and suspension status.\n\n"
+        "Requires a valid `api-key` header with SUPER_USER permission."
+    ),
+    responses={**_admin_auth_error},
 )
 async def list_users(
     _caller: ApiKey = Depends(get_super_user),
@@ -112,6 +132,15 @@ async def list_users(
     "/users/{user_id}/suspension",
     response_model=SuspendUserResponse,
     summary="Suspend or unsuspend a user",
+    description=(
+        "Set the suspension flag for an API key. Suspended users' pages are excluded "
+        "from the processing queue.\n\n"
+        "Requires a valid `api-key` header with SUPER_USER permission."
+    ),
+    responses={
+        **_admin_auth_error,
+        404: {"model": ErrorResponse, "description": "API key with the given user_id was not found."},
+    },
 )
 async def suspend_user(
     user_id: int,
@@ -164,6 +193,12 @@ def _parse_datetime_params(
     "/usage_statistics/users",
     response_model=AllUsersUsageStatisticsResponse,
     summary="Per-user usage statistics",
+    description=(
+        "Return the number of processed pages per user. Optionally filter by date range "
+        "using ISO 8601 path parameters.\n\n"
+        "Requires a valid `api-key` header with SUPER_USER permission."
+    ),
+    responses={**_admin_auth_error, **_bad_date},
 )
 @router.get(
     "/usage_statistics/users/{from_datetime}",
@@ -207,6 +242,12 @@ async def admin_user_usage_statistics(
     "/usage_statistics/engines",
     response_model=EngineUsageStatisticsResponse,
     summary="Per-engine usage statistics",
+    description=(
+        "Return the number of processed pages per engine. Optionally filter by date range "
+        "using ISO 8601 path parameters.\n\n"
+        "Requires a valid `api-key` header with SUPER_USER permission."
+    ),
+    responses={**_admin_auth_error, **_bad_date},
 )
 @router.get(
     "/usage_statistics/engines/{from_datetime}",

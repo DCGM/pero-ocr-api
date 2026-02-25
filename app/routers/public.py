@@ -39,7 +39,15 @@ async def index(request: Request, db: AsyncSession = Depends(get_db)):
     )
 
 
-@router.get("/docs_redirect", tags=["Public"])
+@router.get(
+    "/docs_redirect",
+    tags=["Public"],
+    summary="Redirect to SwaggerHub API documentation",
+    description="Redirects the client to the externally hosted SwaggerHub API documentation page.",
+    responses={
+        307: {"description": "Redirect to the SwaggerHub documentation URL."},
+    },
+)
 async def documentation():
     """Redirect to the SwaggerHub API documentation."""
     return RedirectResponse(
