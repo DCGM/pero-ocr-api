@@ -9,12 +9,14 @@ Usage::
 
 import asyncio
 import datetime
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
+from fastapi.openapi.utils import get_openapi
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 
@@ -119,5 +121,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(user_router)
     app.include_router(worker_router)
     app.include_router(admin_router)
+
+    # ------------------------------------------------------------------
+    # Override /openapi.json so that null values in examples are preserved.
+    # FastAPI's default get_openapi() serialises the spec with
+    # jsonable_encoder(exclude_none=True), which silently drops every null
+    # from every example.  We rebuild the schema ourselves and serve it
+    # with plain json.dumps() so null → "null" is kept intact.
+    # ------------------------------------------------------------------
+    def custom_openapi() -> dict:
+        if app.openapi_schema:
+            return app.openapi_schema
+        schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            description=app.description,
+            routes=app.routes,
+        )
+        # Re-inject null values that were stripped by jsonable_encoder.
+        # Walk every component schema and restore None in examples where the
+        # json_schema_extra on the Pydantic model still carries them.
+        from app.schemas.requests import ProcessingRequestCreate
+        model_schema = ProcessingRequestCreate.model_json_schema()
+        model_title = model_schema.get("title", "ProcessingRequestCreate")
+        if model_example := model_schema.get("example"):
+            try:
+                schema["components"]["schemas"][model_title]["example"] = model_example
+            except KeyError:
+                pass
+        app.openapi_schema = schema
+        return app.openapi_schema
+
+    app.openapi = custom_openapi  # type: ignore[method-assign]
+
+    @app.get("/openapi.json", include_in_schema=False)
+    async def openapi_json_route() -> Response:
+        return Response(
+            content=json.dumps(app.openapi()),
+            media_type="application/json",
+        )
 
     return app
