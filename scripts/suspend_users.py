@@ -1,9 +1,9 @@
 import argparse
-from app.db import Base
+from db.base import Base
 from sqlalchemy import create_engine
 from sqlalchemy.orm import scoped_session, sessionmaker
 
-from app.db.model import ApiKey
+from db.models import ApiKey
 
 
 def get_args():
@@ -25,12 +25,10 @@ if __name__ == '__main__':
     args = get_args()
 
     engine = create_engine(f'{args.database}',
-                           convert_unicode=True,
                            connect_args={})
     db_session = scoped_session(sessionmaker(autocommit=False,
                                              autoflush=False,
                                              bind=engine))
-    Base.query = db_session.query_property()
     Base.metadata.create_all(bind=engine)
 
     api_keys = db_session.query(ApiKey).all()

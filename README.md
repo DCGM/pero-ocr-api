@@ -1,34 +1,57 @@
 # PERO-API
 
-> **Note:** This documentation is intended as a complete reference for rewriting the API to fully async FastAPI + new SQLAlchemy (2.x async).
-
 ## Overview
 
-This is an API for document processing (OCR). Users are given an API key, they can create OCR processing tasks with either image URLs or they can upload the document images. The pages are processed by workers which connect to the API and request pages to be processed (including the OCR models). Processed pages are uploaded by the worker to the API and can be downloaded by the user.
+REST API for document processing (OCR). Users submit images via API key authentication, workers fetch and process pages, and results are downloaded by users.
+
+### Tech Stack
+
+- **Framework:** FastAPI (fully async)
+- **ORM:** SQLAlchemy 2.x (async, `Mapped[]` style)
+- **Database:** PostgreSQL via `asyncpg` (production) / SQLite via `aiosqlite` (dev/test)
+- **Migrations:** Alembic (async)
+- **Config:** pydantic-settings (`.env` file)
+- **Background tasks:** native `asyncio` loops (processing timeout, old file cleanup)
+- **Email:** `drymail` (SMTP)
+- **Server:** uvicorn
+- **Tests:** pytest + pytest-asyncio + httpx
 
 ### Project Structure
 
-- `app/` — the Flask API backend (Blueprint-based)
-- `app/db/` — SQLAlchemy models, authentication helpers, GUID type
-- `app/main/` — Flask Blueprint with all routes and business logic
-- `app/mail/` — email notification helper (uses `drymail`)
-- `app/templates/` — single Jinja2 template (`index.html`) for dashboard
-- `processing_client/` — the OCR worker process (connects to API to fetch & process pages)
-- `scripts/` — administration scripts (manage API keys, engines, DB migration)
-- `sql/` — SQL utility scripts
-- `user_scripts/` — examples how to use the API
-- `config.py` — configuration (see `config-example.py`)
+```
+run_app.py                   # uvicorn entry point
+app/
+  __init__.py                # FastAPI factory (create_app, lifespan)
+  config.py                  # pydantic-settings (Settings)
+  dependencies.py            # Depends(): get_db, get_current_user, etc.
+  exceptions.py              # ApiError hierarchy + global handlers
+  schemas/                   # Pydantic request/response models
+  crud/                      # async DB operations
+  services/                  # file I/O, email helpers
+  background/                # asyncio background loops
+  routers/                   # route handlers (public, user, worker)
+  templates/                 # Jinja2 HTML templates
+db/
+  base.py                    # DeclarativeBase
+  models.py                  # ORM models
+  session.py                 # async engine + session factory
+alembic/                     # database migrations
+processing_client/           # OCR worker daemon
+scripts/                     # admin scripts
+tests/                       # async test suite (78 tests)
+```
 
-### Tech Stack (Current)
+### Quick Start
 
-- **Framework:** Flask 1.1.x
-- **ORM:** SQLAlchemy 1.3.x (synchronous)
-- **Session management:** `flask_sqlalchemy_session` (request-scoped sessions)
-- **Database:** PostgreSQL (production) / SQLite (development) — via `psycopg2`
-- **Background jobs:** APScheduler (`BackgroundScheduler`)
-- **Email:** `drymail` (SMTP)
-- **Server:** Gunicorn (production), Flask dev server (development)
-- **Other:** Flask-Bootstrap, Flask-Dropzone, Flask-JSGlue, filelock
+```bash
+cp config-example.env .env   # edit DATABASE_URL etc.
+pip install -r requirements.txt
+python run_app.py            # starts on http://0.0.0.0:5000
+```
+
+Auto-generated API docs: `http://localhost:5000/docs` (Swagger UI) and `/redoc`.
+
+See [migration.md](migration.md) for upgrading from the previous Flask version.
 
 ---
 
@@ -40,7 +63,7 @@ API key-based authentication via the `api-key` HTTP header.
 
 - Every request to a protected endpoint must include the header: `api-key: <key_string>`
 - Keys are stored in the `api_key` database table.
-- Keys are generated using `base64(sha256(random_256_bits))` (see `app/db/api_key.py :: generate_hash_key()`).
+- Keys are generated using `base64(sha256(random_256_bits))` (see `app/crud/api_key.py :: generate_hash_key()`).
 
 ### Permission Levels
 
@@ -53,10 +76,10 @@ Two permission levels exist (enum `Permission`):
 
 ### Auth Decorators
 
-Defined in `app/db/api_key.py`:
+Defined as FastAPI dependencies in `app/dependencies.py`:
 
-- **`@require_user_api_key`** — requires any valid API key (`USER` or `SUPER_USER`). Checks that the `api-key` header matches any `ApiKey` row. Returns HTTP 401 if invalid.
-- **`@require_super_user_api_key`** — requires an API key with `SUPER_USER` permission. Checks that the `api-key` header matches an `ApiKey` row where `permission == SUPER_USER`. Returns HTTP 401 if invalid.
+- **`get_current_user`** — requires any valid API key (`USER` or `SUPER_USER`). Checks that the `api-key` header matches any `ApiKey` row. Returns HTTP 401 if invalid.
+- **`get_super_user`** — requires an API key with `SUPER_USER` permission. Checks that the `api-key` header matches an `ApiKey` row where `permission == SUPER_USER`. Returns HTTP 401 if invalid.
 
 ### Suspension
 
@@ -71,11 +94,11 @@ API keys have a `suspension` boolean field. Suspended keys are excluded from the
 
 ## Database Schema
 
-All models use SQLAlchemy declarative base (`app/db/__init__.py`). Tables are auto-created via `Base.metadata.create_all()`.
+All models use SQLAlchemy 2.x declarative base with `Mapped[]` style (`db/base.py`, `db/models.py`). Tables are auto-created on startup via `Base.metadata.create_all()`.
 
 ### Custom Types
 
-- **`GUID`** (`app/db/guid.py`): A `TypeDecorator` that stores UUIDs. Uses native `UUID` type on PostgreSQL, `String` on other dialects. Converts between Python `uuid.UUID` and DB representation automatically.
+- **`Uuid`**: SQLAlchemy 2.x built-in `Uuid` type. Uses native `UUID` type on PostgreSQL, compatible representation on other dialects. Replaces the old custom `GUID` TypeDecorator.
 
 ### Tables
 
@@ -209,7 +232,7 @@ CREATED ──> WAITING ──> PROCESSING ──> PROCESSED ──> EXPIRED
 
 ## API Endpoints
 
-All endpoints are registered on a Flask Blueprint (`main`). Base URL depends on `APPLICATION_ROOT` config.
+All endpoints are registered on FastAPI routers (`app/routers/public.py`, `app/routers/user.py`, `app/routers/worker.py`). Base URL depends on `APPLICATION_ROOT` config.
 
 ### Public Endpoints (No Auth)
 
@@ -405,9 +428,9 @@ These endpoints are used by processing workers. They require the `SUPER_USER` pe
 
 ---
 
-## Background Jobs (APScheduler)
+## Background Tasks (asyncio)
 
-Two background jobs run on the API server:
+Two background loops run as native `asyncio` tasks during the application lifespan:
 
 ### 1. `processing_timeout` (every 60 seconds)
 - Finds pages in `PROCESSING` state where `processing_timestamp` is older than 60 seconds.
@@ -421,43 +444,48 @@ Two background jobs run on the API server:
 
 ---
 
-## Configuration (`config.py`)
+## Configuration (`config-example.env`)
 
-See `config-example.py` for the template. Key settings:
+See `config-example.env` for the template. Settings are loaded via `pydantic-settings` from
+environment variables or a `.env` file.
 
 | Setting                        | Type       | Description                                             |
 |--------------------------------|------------|---------------------------------------------------------|
-| `database_url`                 | `str`      | SQLAlchemy database URL (top-level variable)            |
-| `Config.DEBUG`                 | `bool`     | Flask debug mode                                        |
-| `Config.PROCESSED_REQUESTS_FOLDER` | `str` | Directory for storing result ZIP files                  |
-| `Config.MODELS_FOLDER`        | `str`      | Directory containing OCR model files                    |
-| `Config.UPLOAD_IMAGES_FOLDER` | `str`      | Directory for user-uploaded images                      |
-| `Config.ALLOWED_IMAGE_EXTENSIONS` | `set`  | Allowed image upload extensions (`jpg`, `jpeg`, `png`)  |
-| `Config.APPLICATION_ROOT`     | `str`      | URL prefix for the application                          |
-| `Config.EMAIL_NOTIFICATION_ADDRESSES` | `list` | Email addresses for error notifications           |
-| `Config.MAX_EMAIL_FREQUENCY`  | `int`      | Minimum seconds between notification emails             |
-| `Config.MAIL_SERVER`          | `str`      | SMTP server hostname                                    |
-| `Config.MAIL_USERNAME`        | `str`      | SMTP username                                           |
-| `Config.MAIL_PASSWORD`        | `str`      | SMTP password                                           |
+| `DATABASE_URL`                 | `str`      | SQLAlchemy async database URL                           |
+| `DEBUG`                        | `bool`     | Debug mode                                              |
+| `PROCESSED_REQUESTS_FOLDER`    | `str`      | Directory for storing result ZIP files                  |
+| `MODELS_FOLDER`                | `str`      | Directory containing OCR model files                    |
+| `UPLOAD_IMAGES_FOLDER`         | `str`      | Directory for user-uploaded images                      |
+| `ALLOWED_IMAGE_EXTENSIONS`     | `set`      | Allowed image upload extensions (`jpg`, `jpeg`, `png`)  |
+| `APPLICATION_ROOT`             | `str`      | URL prefix for the application                          |
+| `EMAIL_NOTIFICATION_ADDRESSES` | `list`     | Email addresses for error notifications                 |
+| `MAX_EMAIL_FREQUENCY`          | `int`      | Minimum seconds between notification emails             |
+| `MAIL_SERVER`                  | `str`      | SMTP server hostname                                    |
+| `MAIL_USERNAME`                | `str`      | SMTP username                                           |
+| `MAIL_PASSWORD`                | `str`      | SMTP password                                           |
 
 ---
 
 ## Application Initialization (`app/__init__.py`)
 
-1. Creates SQLAlchemy engine and session factory (module-level).
-2. `create_app()`:
-   - Creates Flask app, loads config.
-   - Calls `init_db()` → creates all tables, sets up `flask_scoped_session`.
-   - Starts APScheduler with two background jobs.
+1. `create_app()` builds the `FastAPI` instance:
+   - Configures `lifespan` async context manager.
+   - Registers exception handlers from `app.exceptions`.
+   - Mounts Jinja2 templates and static files.
+   - Includes routers: `public`, `user`, `worker`.
+2. On startup (lifespan enter):
+   - Initialises the async SQLAlchemy engine and session factory.
+   - Creates all tables (dev convenience; production uses Alembic).
    - Creates required directories (`PROCESSED_REQUESTS_FOLDER`, `MODELS_FOLDER`, `UPLOAD_IMAGES_FOLDER`).
-   - Initializes Bootstrap, Dropzone, JSGlue.
-   - Initializes `notification` table singleton row.
-   - Registers the `main` Blueprint.
-   - Adds `@after_request` hook to remove (close) the scoped session.
+   - Ensures the `notification` singleton row exists.
+   - Starts background asyncio tasks (`processing_timeout`, `old_files_removals`).
+3. On shutdown (lifespan exit):
+   - Cancels background tasks.
+   - Disposes the async engine.
 
 ---
 
-## Email Notifications (`app/mail/mail.py`)
+## Email Notifications (`app/services/mail_service.py`)
 
 Uses `drymail` library. Sends HTML emails via SMTP (with TLS if password is set).
 
@@ -472,9 +500,9 @@ Rate limited via the `notification` table singleton (`MAX_EMAIL_FREQUENCY` secon
 
 ## Error Handling
 
-- **HTTP 500:** Global error handler in `routes.py` sends an email notification and then re-aborts with 500.
+- **HTTP 500:** Global exception handler sends an email notification and returns a JSON error response.
 - **Auth failures:** Return HTTP 401 with message about invalid/missing API key.
-- **Ownership checks:** Many user endpoints verify that a request belongs to the authenticated API key; returns 401 if not.
+- **Ownership checks:** User endpoints verify that a request belongs to the authenticated API key; returns 401 if not.
 
 ---
 
@@ -533,34 +561,6 @@ Copies all data from source to destination database (table by table in dependenc
 
 ---
 
-## Key Architectural Notes for Rewrite
-
-1. **Session Management:** Currently uses `flask_scoped_session` (thread-local, request-scoped). The session is removed in `@after_request`. For FastAPI async, replace with async SQLAlchemy sessions using dependency injection.
-
-2. **Background Jobs:** APScheduler runs `processing_timeout` and `old_files_removals` in background threads with their own session (not request-scoped). For FastAPI, consider using `asyncio` tasks, `arq`, or keeping APScheduler.
-
-3. **File Locking:** `filelock.FileLock` is used for concurrent ZIP file access. This may need rethinking for async (could use `asyncio.Lock` or async-compatible file locks).
-
-4. **GUID Type:** Custom `TypeDecorator` for UUID support across PostgreSQL and SQLite. SQLAlchemy 2.x has better native UUID support.
-
-5. **Fair Scheduling:** `get_page_by_preferred_engine()` implements fair round-robin across API keys based on recent processing counts. This logic queries multiple tables and should be carefully implemented with async queries.
-
-6. **Blueprint → Router:** The single Flask Blueprint maps directly to a FastAPI `APIRouter`.
-
-7. **Auth Decorators → Dependencies:** `@require_user_api_key` and `@require_super_user_api_key` should become FastAPI `Depends()` dependencies.
-
-8. **No ORM Relationships:** The current models don't use SQLAlchemy `relationship()` — all joins are done manually in queries. Consider adding relationships in the rewrite.
-
-9. **Mixed Timestamp Usage:** Some timestamps use `datetime.datetime.utcnow()`, others use `datetime.datetime.now()`. Standardize in the rewrite.
-
-10. **Config:** Module-level `from config import *` — replace with Pydantic `BaseSettings` for FastAPI.
-
-11. **Score Handling:** Worker sends score as float 0-1, API multiplies by 100 and rounds to 2 decimals before storing.
-
-12. **Request JSON Format:** The `post_processing_request` endpoint expects `{"engine": <id>, "images": {"name": "url_or_null"}}`. Define Pydantic models for validation.
-
----
-
 ## Processing Flow
 
 ```
@@ -592,5 +592,3 @@ User                          API Server                      Worker
  ├─ GET /download_results ───────>│                              │
  │<─── ALTO/PAGE/TXT file ──────│                              │
 ```
-
- 

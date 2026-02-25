@@ -5,12 +5,12 @@ from pathlib import Path
 from datetime import date
 from distutils.dir_util import copy_tree
 
-from app.db import Base
+from db.base import Base
 from sqlalchemy import create_engine
 from sqlalchemy.orm import scoped_session, sessionmaker
 
-from app.db.model import Engine, EngineVersion, Model, EngineVersionModel
-from config import Config
+from db.models import Engine, EngineVersion, Model, EngineVersionModel
+from app.config import get_settings
 
 
 def get_args():
@@ -70,17 +70,15 @@ if __name__ == '__main__':
 
     # connect DB
     db_engine = create_engine(args.database,
-                           convert_unicode=True,
                            connect_args={})
     db_session = scoped_session(sessionmaker(autocommit=False,
                                              autoflush=False,
                                              bind=db_engine))
-    Base.query = db_session.query_property()
     Base.metadata.create_all(bind=db_engine)
 
     # get or create engine
     if engine is None:
-        db_engine = Engine(engine_name, engine_description)
+        db_engine = Engine(name=engine_name, description=engine_description)
         db_session.add(db_engine)
         db_session.commit()
     else:
@@ -90,10 +88,11 @@ if __name__ == '__main__':
     if args.engine_version_name is None:
         today = date.today()
         engine_version_name = today.strftime("%Y-%m-%d")
-    engine_version = EngineVersion(engine_version_name, db_engine.id, engine_version_description)
+    engine_version = EngineVersion(version=engine_version_name, engine_id=db_engine.id, description=engine_version_description)
     db_session.add(engine_version)
 
     # create new models
+    settings = get_settings()
     db_models = []
     for model in models:
         if model.isdecimal():
@@ -101,18 +100,18 @@ if __name__ == '__main__':
         else:
             name = os.path.basename(os.path.normpath(model))
             config = Path(os.path.join(model, 'config.ini')).read_text()
-            db_model = Model(name, config)
+            db_model = Model(name=name, config=config)
             db_session.add(db_model)
             db_models.append(db_model)
-            Path(os.path.join(Config.MODELS_FOLDER, name)).mkdir(parents=True, exist_ok=True)
-            copy_tree(model, os.path.join(Config.MODELS_FOLDER, name))
+            Path(os.path.join(settings.MODELS_FOLDER, name)).mkdir(parents=True, exist_ok=True)
+            copy_tree(model, os.path.join(settings.MODELS_FOLDER, name))
 
     # connect models to engine version
     db_session.commit()
     print(engine_version)
     for model in db_models:
         print(model)
-        engine_version_model = EngineVersionModel(engine_version.id, model.id)
+        engine_version_model = EngineVersionModel(engine_version_id=engine_version.id, model_id=model.id)
         db_session.add(engine_version_model)
 
     db_session.commit()

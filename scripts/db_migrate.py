@@ -1,7 +1,8 @@
 import sys
 from sqlalchemy import create_engine
 import argparse
-from app.db import Base
+from db.base import Base
+from db.models import *  # noqa: F401,F403 – ensure all tables are registered
 
 
 def parseargs():
@@ -15,9 +16,9 @@ def parseargs():
 def main():
     args = parseargs()
 
-    src = create_engine(args.source_db, convert_unicode=True)
+    src = create_engine(args.source_db)
 
-    dst = create_engine(args.dest_db, convert_unicode=True)
+    dst = create_engine(args.dest_db)
 
     tables = Base.metadata.tables
     table_order = ['model', 'engine', 'engine_version', 'engine_version_model', 'api_key','request', 'page']
@@ -25,9 +26,11 @@ def main():
         print('##################################')
         print(tbl, type(tbl))
         print(tables[tbl].select())
-        data = src.execute(tables[tbl].select()).fetchall()
+        with src.connect() as src_conn:
+            data = src_conn.execute(tables[tbl].select()).fetchall()
         if data:
-            dst.execute(tables[tbl].insert(), data)
+            with dst.begin() as dst_conn:
+                dst_conn.execute(tables[tbl].insert(), [row._mapping for row in data])
 
     print('done')
 

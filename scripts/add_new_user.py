@@ -1,10 +1,10 @@
 import argparse
-from app.db import Base
+from db.base import Base
 from sqlalchemy import create_engine
 from sqlalchemy.orm import scoped_session, sessionmaker
 
-from app.db.api_key import generate_hash_key
-from app.db.model import ApiKey, Permission
+from app.crud.api_key import generate_hash_key
+from db.models import ApiKey, Permission
 
 
 def get_args():
@@ -24,7 +24,7 @@ def get_args():
 
 def add_new_api_key_to_db(db_session, owner, permission):
     api_string = generate_hash_key()
-    api_key = ApiKey(api_string, owner, permission)
+    api_key = ApiKey(api_string=api_string, owner=owner, permission=permission)
     db_session.add(api_key)
     db_session.commit()
 
@@ -41,12 +41,10 @@ if __name__ == '__main__':
         permission = Permission.SUPER_USER
 
     engine = create_engine(f'{args.database}',
-                           convert_unicode=True,
                            connect_args={})
     db_session = scoped_session(sessionmaker(autocommit=False,
                                              autoflush=False,
                                              bind=engine))
-    Base.query = db_session.query_property()
     Base.metadata.create_all(bind=engine)
 
     api_string = add_new_api_key_to_db(db_session, owner, permission)
